@@ -1,0 +1,71 @@
+platform :osx, '10.15'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'ephemeral', 'Flutter-Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure \"flutter pub get\" is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Flutter-Generated.xcconfig, then run \"flutter pub get\""
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_macos_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_macos_build_settings(target)
+  end
+  
+  # Copy hiddify-core.dylib to the app's Frameworks directory at build time
+  main_project = installer.aggregate_targets.first.user_project
+  runner_target = main_project.targets.find { |t| t.name == 'Runner' }
+  
+  if runner_target
+    phase_name = 'Copy HiddifyCore dylib'
+    existing = runner_target.shell_script_build_phases.find { |p| p.name == phase_name }
+    unless existing
+      phase = runner_target.new_shell_script_build_phase(phase_name)
+      phase.shell_script = <<-SCRIPT
+DYLIB_SRC="${SRCROOT}/Frameworks/hiddify-core.dylib"
+DYLIB_DST="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+if [ -f "$DYLIB_SRC" ]; then
+  mkdir -p "$DYLIB_DST"
+  cp -f "$DYLIB_SRC" "$DYLIB_DST/"
+  SIGN_ID="${EXPANDED_CODE_SIGN_IDENTITY:-"-"}"
+  codesign --force --sign "$SIGN_ID" --timestamp=none "$DYLIB_DST/hiddify-core.dylib" || true
+  echo "Copied and signed hiddify-core.dylib"
+else
+  echo "warning: hiddify-core.dylib not found at $DYLIB_SRC"
+  echo "Download from https://github.com/hiddify/hiddify-core/releases"
+fi
+      SCRIPT
+      phase.output_paths = ['$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/hiddify-core.dylib']
+      phase.input_paths = ['$(SRCROOT)/Frameworks/hiddify-core.dylib']
+    end
+    main_project.save
+  end
+end
