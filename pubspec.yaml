@@ -4,9 +4,9 @@ description: >-
   Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria, TUIC, WireGuard and more.
   Switch between cores at runtime.
 version: 1.0.0
-homepage: https://github.com/YourUsername/v2ray_box
-repository: https://github.com/YourUsername/v2ray_box
-issue_tracker: https://github.com/YourUsername/v2ray_box/issues
+homepage: https://github.com/pesaregorg/v2ray_box
+repository: https://github.com/pesaregorg/v2ray_box
+issue_tracker: https://github.com/pesaregorg/v2ray_box/issues
 
 topics:
   - vpn
