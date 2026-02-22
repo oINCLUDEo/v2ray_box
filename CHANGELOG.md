@@ -1,3 +1,11 @@
+## 1.0.3 - 2026-02-22
+
+* Android: improved sing-box config generation (DNS/route defaults, transport normalization, domain resolver handling) for better compatibility with V2Ray links.
+* Android: fixed sing-box "connected but no traffic" scenarios by using stable direct DNS fallback and waiting for sing-box inbound readiness before starting the VPN bridge.
+* Android: optimized ping implementation with bounded parallelism and timeout controls; added default timeout `7000ms` for `ping` and `pingAll` (optional override).
+* Android: improved Xray outbound normalization and transport/TLS parsing consistency for legacy/partial links.
+* Docs/example: updated ping timeout usage and default ping URL to `https://www.gstatic.com/generate_204`.
+
 ## 1.0.2 - 2026-02-22
 
 * Docs: added required Android manifest permissions/services used by the example app.

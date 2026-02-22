@@ -3,9 +3,13 @@ package com.example.v2ray_box.utils
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 
 object SingboxProcess {
     private const val TAG = "V2Ray/SingboxProcess"
+    private const val MIXED_INBOUND_HOST = "127.0.0.1"
+    private const val MIXED_INBOUND_PORT = 10808
     private var process: Process? = null
     @Volatile var isRunning: Boolean = false
         private set
@@ -112,5 +116,26 @@ object SingboxProcess {
             process = null
             isRunning = false
         }
+    }
+
+    fun waitForMixedInboundReady(timeoutMs: Long = 4000L): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (!isRunning) return false
+            try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(MIXED_INBOUND_HOST, MIXED_INBOUND_PORT), 200)
+                    return true
+                }
+            } catch (_: Exception) {
+            }
+            try {
+                Thread.sleep(120)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return false
     }
 }

@@ -122,12 +122,12 @@ class BoxService(
                         "protocol" to "tun",
                         "settings" to mapOf(
                             "name" to "xray0",
-                            "MTU" to 9000,
+                            "MTU" to 1500,
                             "userLevel" to 8
                         ),
                         "sniffing" to mapOf(
                             "enabled" to true,
-                            "destOverride" to listOf("http", "tls", "quic")
+                            "destOverride" to listOf("http", "tls")
                         )
                     )
                 ),
@@ -144,7 +144,11 @@ class BoxService(
                             )
                         )
                     ),
-                    mapOf("tag" to "direct", "protocol" to "freedom", "settings" to mapOf<String, Any>())
+                    mapOf(
+                        "tag" to "direct",
+                        "protocol" to "freedom",
+                        "settings" to mapOf("domainStrategy" to "UseIP")
+                    )
                 ),
                 "routing" to mapOf(
                     "domainStrategy" to "AsIs",
@@ -319,6 +323,11 @@ class BoxService(
 
         if (!SingboxProcess.start(service, singboxConfigPath)) {
             stopAndAlert(Alert.StartService, "Failed to start sing-box process")
+            return false
+        }
+        if (!SingboxProcess.waitForMixedInboundReady()) {
+            SingboxProcess.stop()
+            stopAndAlert(Alert.StartService, "sing-box inbound not ready on 127.0.0.1:10808")
             return false
         }
         Log.d(TAG, "sing-box process started")

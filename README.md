@@ -362,14 +362,16 @@ final info = await v2rayBox.getCoreInfo();
 ### Ping
 
 ```dart
-// Single
+// Single (timeout is optional, default: 7000ms)
 final latency = await v2rayBox.ping(configLink);
+final latencyFastFail = await v2rayBox.ping(configLink, timeout: 4000);
 
-// Parallel batch with streaming results
+// Parallel batch (timeout is optional, default: 7000ms per config)
 final sub = v2rayBox.watchPingResults().listen((result) {
   print('${result["link"]}: ${result["latency"]}ms');
 });
 final results = await v2rayBox.pingAll(links);
+final resultsSlowNetwork = await v2rayBox.pingAll(links, timeout: 10000);
 await sub.cancel();
 ```
 
@@ -503,8 +505,8 @@ On macOS, both cores run as CLI binaries (subprocesses):
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `ping(link, {timeout})` | `Future<int>` | Test latency of a single config (ms) |
-| `pingAll(links, {timeout})` | `Future<Map<String, int>>` | Test latency of multiple configs in parallel |
+| `ping(link, {timeout})` | `Future<int>` | Test latency of a single config (ms). `timeout` is optional, default `7000` ms. |
+| `pingAll(links, {timeout})` | `Future<Map<String, int>>` | Test latency of multiple configs in parallel. `timeout` is optional, default `7000` ms per config. |
 | `watchPingResults()` | `Stream<Map<String, dynamic>>` | Watch individual ping results during `pingAll` |
 | `setPingTestUrl(url)` | `Future<bool>` | Set custom URL for ping testing |
 | `getPingTestUrl()` | `Future<String>` | Get current ping test URL |

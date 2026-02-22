@@ -150,7 +150,7 @@ object Settings {
         set(value) = preferences.edit().putString(SettingsKey.NOTIFICATION_ICON_NAME, value).apply()
 
     var pingTestUrl: String
-        get() = preferences.getString(SettingsKey.PING_TEST_URL, "http://connectivitycheck.gstatic.com/generate_204")!!
+        get() = preferences.getString(SettingsKey.PING_TEST_URL, "https://www.gstatic.com/generate_204")!!
         set(value) = preferences.edit().putString(SettingsKey.PING_TEST_URL, value).apply()
 
     var coreEngine: String
@@ -246,4 +246,3 @@ object Settings {
         return true
     }
 }
-

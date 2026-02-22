@@ -23,20 +23,11 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
     JSONMethodCodec(),
   );
 
-  final statsChannel = const EventChannel(
-    'v2ray_box/stats',
-    JSONMethodCodec(),
-  );
+  final statsChannel = const EventChannel('v2ray_box/stats', JSONMethodCodec());
 
-  final pingChannel = const EventChannel(
-    'v2ray_box/ping',
-    JSONMethodCodec(),
-  );
+  final pingChannel = const EventChannel('v2ray_box/ping', JSONMethodCodec());
 
-  final logsChannel = const EventChannel(
-    'v2ray_box/logs',
-    JSONMethodCodec(),
-  );
+  final logsChannel = const EventChannel('v2ray_box/logs', JSONMethodCodec());
 
   @override
   Future<String?> getPlatformVersion() async {
@@ -103,13 +94,17 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<bool> checkVpnPermission() async {
-    final result = await methodChannel.invokeMethod<bool>('check_vpn_permission');
+    final result = await methodChannel.invokeMethod<bool>(
+      'check_vpn_permission',
+    );
     return result ?? false;
   }
 
   @override
   Future<bool> requestVpnPermission() async {
-    final result = await methodChannel.invokeMethod<bool>('request_vpn_permission');
+    final result = await methodChannel.invokeMethod<bool>(
+      'request_vpn_permission',
+    );
     return result ?? false;
   }
 
@@ -178,7 +173,7 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
   }
 
   @override
-  Future<int> urlTest(String link, {int timeout = 5000}) async {
+  Future<int> urlTest(String link, {int timeout = 7000}) async {
     final result = await methodChannel.invokeMethod<dynamic>('url_test', {
       'link': link,
       'timeout': timeout,
@@ -191,14 +186,11 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
   @override
   Future<Map<String, int>> urlTestAll(
     List<String> links, {
-    int timeout = 5000,
+    int timeout = 7000,
   }) async {
     final result = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
       'url_test_all',
-      {
-        'links': links,
-        'timeout': timeout,
-      },
+      {'links': links, 'timeout': timeout},
     );
     if (result == null) return {};
     return result.map((key, value) {
@@ -225,13 +217,13 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
   }
 
   @override
-  Future<bool> setPerAppProxyList(List<String> packages, PerAppProxyMode mode) async {
+  Future<bool> setPerAppProxyList(
+    List<String> packages,
+    PerAppProxyMode mode,
+  ) async {
     final result = await methodChannel.invokeMethod<bool>(
       'set_per_app_proxy_list',
-      {
-        'list': packages,
-        'mode': mode.value,
-      },
+      {'list': packages, 'mode': mode.value},
     );
     return result ?? false;
   }
@@ -302,20 +294,27 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<bool> resetTotalTraffic() async {
-    final result = await methodChannel.invokeMethod<bool>('reset_total_traffic');
+    final result = await methodChannel.invokeMethod<bool>(
+      'reset_total_traffic',
+    );
     return result ?? false;
   }
 
   @override
   Future<Map<String, dynamic>> getCoreInfo() async {
-    final result = await methodChannel.invokeMethod<Map<dynamic, dynamic>>('get_core_info');
+    final result = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'get_core_info',
+    );
     if (result == null) return {};
     return Map<String, dynamic>.from(result);
   }
 
   @override
   Future<bool> setCoreEngine(String engine) async {
-    final result = await methodChannel.invokeMethod<bool>('set_core_engine', engine);
+    final result = await methodChannel.invokeMethod<bool>(
+      'set_core_engine',
+      engine,
+    );
     return result ?? false;
   }
 
@@ -327,7 +326,10 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<String> checkConfigJson(String configJson) async {
-    final result = await methodChannel.invokeMethod<String>('check_config_json', configJson);
+    final result = await methodChannel.invokeMethod<String>(
+      'check_config_json',
+      configJson,
+    );
     return result ?? '';
   }
 
@@ -359,7 +361,10 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<bool> setDebugMode(bool enabled) async {
-    final result = await methodChannel.invokeMethod<bool>('set_debug_mode', enabled);
+    final result = await methodChannel.invokeMethod<bool>(
+      'set_debug_mode',
+      enabled,
+    );
     return result ?? false;
   }
 
@@ -371,31 +376,45 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<String> formatBytes(int bytes) async {
-    final result = await methodChannel.invokeMethod<String>('format_bytes', bytes);
+    final result = await methodChannel.invokeMethod<String>(
+      'format_bytes',
+      bytes,
+    );
     return result ?? '0 B';
   }
 
   @override
   Future<String> getActiveConfig() async {
-    final result = await methodChannel.invokeMethod<String>('get_active_config');
+    final result = await methodChannel.invokeMethod<String>(
+      'get_active_config',
+    );
     return result ?? '';
   }
 
   @override
   Future<String> proxyDisplayType(String type) async {
-    final result = await methodChannel.invokeMethod<String>('proxy_display_type', type);
+    final result = await methodChannel.invokeMethod<String>(
+      'proxy_display_type',
+      type,
+    );
     return result ?? type;
   }
 
   @override
   Future<String> formatConfig(String configJson) async {
-    final result = await methodChannel.invokeMethod<String>('format_config', configJson);
+    final result = await methodChannel.invokeMethod<String>(
+      'format_config',
+      configJson,
+    );
     return result ?? configJson;
   }
 
   @override
   Future<int> availablePort(int startPort) async {
-    final result = await methodChannel.invokeMethod<int>('available_port', startPort);
+    final result = await methodChannel.invokeMethod<int>(
+      'available_port',
+      startPort,
+    );
     return result ?? -1;
   }
 
@@ -410,23 +429,29 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<bool> setClashMode(String mode) async {
-    final result = await methodChannel.invokeMethod<bool>('set_clash_mode', mode);
+    final result = await methodChannel.invokeMethod<bool>(
+      'set_clash_mode',
+      mode,
+    );
     return result ?? false;
   }
 
   @override
   Future<Map<String, dynamic>> parseSubscription(String link) async {
-    final result = await methodChannel.invokeMethod<Map<dynamic, dynamic>>('parse_subscription', link);
+    final result = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'parse_subscription',
+      link,
+    );
     if (result == null) return {};
     return Map<String, dynamic>.from(result);
   }
 
   @override
   Future<String> generateSubscriptionLink(String name, String url) async {
-    final result = await methodChannel.invokeMethod<String>('generate_subscription_link', {
-      'name': name,
-      'url': url,
-    });
+    final result = await methodChannel.invokeMethod<String>(
+      'generate_subscription_link',
+      {'name': name, 'url': url},
+    );
     return result ?? '';
   }
 
@@ -438,13 +463,18 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
 
   @override
   Future<bool> setPingTestUrl(String url) async {
-    final result = await methodChannel.invokeMethod<bool>('set_ping_test_url', url);
+    final result = await methodChannel.invokeMethod<bool>(
+      'set_ping_test_url',
+      url,
+    );
     return result ?? false;
   }
 
   @override
   Future<String> getPingTestUrl() async {
-    final result = await methodChannel.invokeMethod<String>('get_ping_test_url');
-    return result ?? 'http://connectivitycheck.gstatic.com/generate_204';
+    final result = await methodChannel.invokeMethod<String>(
+      'get_ping_test_url',
+    );
+    return result ?? 'https://www.gstatic.com/generate_204';
   }
 }
