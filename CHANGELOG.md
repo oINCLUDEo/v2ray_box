@@ -1,3 +1,8 @@
+## 1.0.2 - 2026-02-22
+
+* Docs: added required Android manifest permissions/services used by the example app.
+* Docs: unified Android Gradle settings into a single section to avoid duplicated setup steps.
+
 ## 1.0.1 - 2026-02-22
 
 * Android: improved Xray/Sing-box config normalization for V2Ray links with empty or legacy query fields.
