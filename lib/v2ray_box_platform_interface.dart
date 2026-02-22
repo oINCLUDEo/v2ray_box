@@ -66,7 +66,9 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
   /// Request VPN permission
   /// Returns true if permission was already granted, false if permission dialog was shown
   Future<bool> requestVpnPermission() {
-    throw UnimplementedError('requestVpnPermission() has not been implemented.');
+    throw UnimplementedError(
+      'requestVpnPermission() has not been implemented.',
+    );
   }
 
   /// Set service mode (vpn or proxy)
@@ -81,12 +83,16 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
 
   /// Set notification stop button text
   Future<bool> setNotificationStopButtonText(String text) {
-    throw UnimplementedError('setNotificationStopButtonText() has not been implemented.');
+    throw UnimplementedError(
+      'setNotificationStopButtonText() has not been implemented.',
+    );
   }
 
   /// Set notification title (shown when connected)
   Future<bool> setNotificationTitle(String title) {
-    throw UnimplementedError('setNotificationTitle() has not been implemented.');
+    throw UnimplementedError(
+      'setNotificationTitle() has not been implemented.',
+    );
   }
 
   /// Set notification icon (drawable resource name)
@@ -96,7 +102,9 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
 
   /// Get list of installed apps
   Future<List<AppInfo>> getInstalledPackages() {
-    throw UnimplementedError('getInstalledPackages() has not been implemented.');
+    throw UnimplementedError(
+      'getInstalledPackages() has not been implemented.',
+    );
   }
 
   /// Get app icon as base64 string
@@ -105,12 +113,15 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
   }
 
   /// Test URL connectivity and return latency in ms
-  Future<int> urlTest(String link, {int timeout = 5000}) {
+  Future<int> urlTest(String link, {int timeout = 7000}) {
     throw UnimplementedError('urlTest() has not been implemented.');
   }
 
   /// Test multiple URLs and return latencies
-  Future<Map<String, int>> urlTestAll(List<String> links, {int timeout = 5000}) {
+  Future<Map<String, int>> urlTestAll(
+    List<String> links, {
+    int timeout = 7000,
+  }) {
     throw UnimplementedError('urlTestAll() has not been implemented.');
   }
 
@@ -251,7 +262,9 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
 
   /// Generate a subscription import link
   Future<String> generateSubscriptionLink(String name, String url) {
-    throw UnimplementedError('generateSubscriptionLink() has not been implemented.');
+    throw UnimplementedError(
+      'generateSubscriptionLink() has not been implemented.',
+    );
   }
 
   /// Set the locale for the core library

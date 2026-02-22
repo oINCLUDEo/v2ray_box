@@ -8,10 +8,12 @@ import java.net.URLDecoder
 
 object XrayConfigParser {
     private const val TAG = "V2Ray/XrayConfigParser"
+    private const val XRAY_USER_LEVEL = 8
     private val gson: Gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
 
     fun buildXrayConfig(link: String, proxyOnly: Boolean = false): String {
-        val outbound = parseLink(link) ?: throw Exception("Invalid or unsupported config link")
+        val outbound = parseLink(link)?.toMutableMap() ?: throw Exception("Invalid or unsupported config link")
+        outbound["mux"] = mapOf("enabled" to false)
 
         val socksPort = 10808
         val httpPort = 10809
@@ -24,13 +26,12 @@ object XrayConfigParser {
                 "protocol" to "socks",
                 "sniffing" to mapOf(
                     "enabled" to true,
-                    "destOverride" to listOf("http", "tls", "quic"),
-                    "routeOnly" to true
+                    "destOverride" to listOf("http", "tls")
                 ),
                 "settings" to mapOf(
                     "auth" to "noauth",
                     "udp" to true,
-                    "userLevel" to 8
+                    "userLevel" to XRAY_USER_LEVEL
                 )
             ),
             mapOf(
@@ -40,8 +41,7 @@ object XrayConfigParser {
                 "protocol" to "http",
                 "sniffing" to mapOf(
                     "enabled" to true,
-                    "destOverride" to listOf("http", "tls", "quic"),
-                    "routeOnly" to true
+                    "destOverride" to listOf("http", "tls")
                 ),
                 "settings" to mapOf<String, Any>()
             )
@@ -55,12 +55,12 @@ object XrayConfigParser {
                     "protocol" to "tun",
                     "settings" to mapOf(
                         "name" to "xray0",
-                        "MTU" to 9000,
-                        "userLevel" to 8
+                        "MTU" to 1500,
+                        "userLevel" to XRAY_USER_LEVEL
                     ),
                     "sniffing" to mapOf(
                         "enabled" to true,
-                        "destOverride" to listOf("http", "tls", "quic")
+                        "destOverride" to listOf("http", "tls")
                     )
                 )
             )
@@ -68,20 +68,24 @@ object XrayConfigParser {
 
         val config = mutableMapOf<String, Any>(
             "log" to mapOf("loglevel" to "warning"),
+            "stats" to mapOf<String, Any>(),
+            "policy" to buildPolicy(),
             "dns" to buildDns(),
             "inbounds" to inbounds,
             "outbounds" to listOf(
                 outbound,
-                mapOf("tag" to "direct", "protocol" to "freedom", "settings" to mapOf<String, Any>()),
+                mapOf(
+                    "tag" to "direct",
+                    "protocol" to "freedom",
+                    "settings" to mapOf("domainStrategy" to "UseIP")
+                ),
                 mapOf(
                     "tag" to "block",
                     "protocol" to "blackhole",
                     "settings" to mapOf("response" to mapOf("type" to "http"))
                 )
             ),
-            "routing" to buildRouting(),
-            "stats" to mapOf<String, Any>(),
-            "policy" to buildPolicy()
+            "routing" to buildRouting()
         )
 
         return gson.toJson(config)
@@ -106,51 +110,21 @@ object XrayConfigParser {
 
     private fun buildDns(): Map<String, Any> {
         return mapOf(
-            "hosts" to mapOf("dns.google" to "8.8.8.8"),
-            "servers" to listOf(
-                "https://1.1.1.1/dns-query",
-                "1.1.1.1",
-                "8.8.8.8",
-                "localhost"
-            )
+            "hosts" to emptyMap<String, Any>(),
+            "servers" to emptyList<Any>()
         )
     }
 
     private fun buildRouting(): Map<String, Any> {
         return mapOf(
-            "domainStrategy" to "IPIfNonMatch",
-            "rules" to listOf(
-                mapOf(
-                    "type" to "field",
-                    "outboundTag" to "direct",
-                    "ip" to listOf(
-                        "10.0.0.0/8",
-                        "172.16.0.0/12",
-                        "192.168.0.0/16",
-                        "100.64.0.0/10",
-                        "169.254.0.0/16",
-                        "127.0.0.0/8",
-                        "fc00::/7",
-                        "fe80::/10",
-                        "::1/128"
-                    )
-                ),
-                mapOf(
-                    "type" to "field",
-                    "outboundTag" to "block",
-                    "protocol" to listOf("bittorrent")
-                )
-            )
+            "domainStrategy" to "AsIs",
+            "rules" to emptyList<Any>()
         )
     }
 
     private fun buildPolicy(): Map<String, Any> {
         return mapOf(
             "levels" to mapOf(
-                "0" to mapOf(
-                    "statsUserUplink" to true,
-                    "statsUserDownlink" to true
-                ),
                 "8" to mapOf(
                     "handshake" to 4,
                     "connIdle" to 300,
@@ -201,6 +175,7 @@ object XrayConfigParser {
         defaultServerName: String? = null
     ): Map<String, Any> {
         val stream = mutableMapOf<String, Any>()
+        var transportSniCandidate: String? = null
         val networkTypeRaw = getParam(params, "type") ?: vmessJson?.get("net")?.toString() ?: "tcp"
         val networkType = when (networkTypeRaw.lowercase()) {
             "websocket" -> "ws"
@@ -219,10 +194,14 @@ object XrayConfigParser {
                     ?: getParam(params, "header-type")
                     ?: vmessJson?.get("type")?.toString()
                     ?: "none").lowercase()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
+                if (!host.isNullOrEmpty()) {
+                    transportSniCandidate = host.split(",").firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                }
 
                 val tcpHeader = mutableMapOf<String, Any>("type" to headerType)
                 if (headerType == "http") {
-                    val hostList = (getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                    val hostList = host
                         ?.split(",")
                         ?.map { it.trim() }
                         ?.filter { it.isNotEmpty() }
@@ -262,6 +241,7 @@ object XrayConfigParser {
                 val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) {
                     wsSettings["headers"] = mapOf("Host" to host)
+                    transportSniCandidate = host
                 }
                 stream["wsSettings"] = wsSettings
             }
@@ -273,7 +253,12 @@ object XrayConfigParser {
                 getParam(params, "mode")?.let { mode ->
                     if (mode == "multi") grpcSettings["multiMode"] = true
                 }
-                getParam(params, "authority")?.let { grpcSettings["authority"] = it }
+                getParam(params, "authority")?.let {
+                    grpcSettings["authority"] = it
+                    transportSniCandidate = it
+                }
+                grpcSettings["idle_timeout"] = 60
+                grpcSettings["health_check_timeout"] = 20
                 stream["grpcSettings"] = grpcSettings
             }
             "h2", "http" -> {
@@ -282,7 +267,9 @@ object XrayConfigParser {
                 if (!path.isNullOrEmpty()) httpSettings["path"] = path
                 val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) {
-                    httpSettings["host"] = host.split(",").map { it.trim() }
+                    val hostList = host.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                    httpSettings["host"] = hostList
+                    transportSniCandidate = hostList.firstOrNull()
                 }
                 stream["httpSettings"] = httpSettings
                 stream["network"] = "h2"
@@ -292,7 +279,10 @@ object XrayConfigParser {
                 val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 if (!path.isNullOrEmpty()) huSettings["path"] = path
                 val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                if (!host.isNullOrEmpty()) huSettings["host"] = host
+                if (!host.isNullOrEmpty()) {
+                    huSettings["host"] = host
+                    transportSniCandidate = host
+                }
                 stream["httpupgradeSettings"] = huSettings
             }
             "splithttp", "xhttp" -> {
@@ -300,7 +290,10 @@ object XrayConfigParser {
                 val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 if (!path.isNullOrEmpty()) shSettings["path"] = path
                 val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                if (!host.isNullOrEmpty()) shSettings["host"] = host
+                if (!host.isNullOrEmpty()) {
+                    shSettings["host"] = host
+                    transportSniCandidate = host
+                }
                 getParam(params, "mode")?.let { shSettings["mode"] = it }
                 stream["splithttpSettings"] = shSettings
                 stream["network"] = "splithttp"
@@ -329,6 +322,7 @@ object XrayConfigParser {
                 val sni = getParam(params, "sni")
                     ?: getParam(params, "peer")
                     ?: vmessJson?.get("sni")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: transportSniCandidate?.takeIf { isDomainLike(it) }
                     ?: defaultServerName?.takeIf { isDomainLike(it) }
                 if (!sni.isNullOrEmpty()) tlsSettings["serverName"] = sni
                 val alpn = getParam(params, "alpn") ?: vmessJson?.get("alpn")?.toString()
@@ -346,6 +340,7 @@ object XrayConfigParser {
                 val realitySettings = mutableMapOf<String, Any>()
                 val sni = getParam(params, "sni")
                     ?: getParam(params, "peer")
+                    ?: transportSniCandidate?.takeIf { isDomainLike(it) }
                     ?: defaultServerName?.takeIf { isDomainLike(it) }
                 if (!sni.isNullOrEmpty()) realitySettings["serverName"] = sni
                 val fp = getParam(params, "fp") ?: getParam(params, "fingerprint") ?: "chrome"
@@ -372,7 +367,7 @@ object XrayConfigParser {
         val user = mutableMapOf<String, Any>(
             "id" to uuid,
             "encryption" to (getParam(params, "encryption") ?: "none"),
-            "level" to 0
+            "level" to XRAY_USER_LEVEL
         )
         params["flow"]?.takeIf { it.isNotEmpty() }?.let { user["flow"] = it }
 
@@ -416,7 +411,7 @@ object XrayConfigParser {
             "id" to uuid,
             "alterId" to aid,
             "security" to security,
-            "level" to 0
+            "level" to XRAY_USER_LEVEL
         )
 
         val params = mutableMapOf<String, String>()
@@ -458,7 +453,7 @@ object XrayConfigParser {
             "id" to uuid,
             "alterId" to 0,
             "security" to "auto",
-            "level" to 0
+            "level" to XRAY_USER_LEVEL
         )
 
         val outbound = mutableMapOf<String, Any>(
@@ -500,7 +495,7 @@ object XrayConfigParser {
                         "address" to server,
                         "port" to port,
                         "password" to password,
-                        "level" to 0
+                        "level" to XRAY_USER_LEVEL
                     )
                 )
             ),
@@ -570,11 +565,14 @@ object XrayConfigParser {
                         "port" to port.toInt(),
                         "method" to method,
                         "password" to password,
-                        "level" to 0
+                        "level" to XRAY_USER_LEVEL
                     )
                 )
             ),
-            "streamSettings" to mapOf("network" to "tcp")
+            "streamSettings" to mapOf(
+                "network" to "tcp",
+                "tcpSettings" to mapOf("header" to mapOf("type" to "none"))
+            )
         )
 
         return outbound
@@ -592,7 +590,7 @@ object XrayConfigParser {
             "address" to server,
             "port" to port,
             "password" to auth,
-            "level" to 0
+            "level" to XRAY_USER_LEVEL
         )
 
         val outbound = mutableMapOf<String, Any>(

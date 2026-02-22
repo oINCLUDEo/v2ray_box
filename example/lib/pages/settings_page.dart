@@ -13,7 +13,7 @@ class _SettingsPageState extends State<SettingsPage> {
   VpnMode _mode = VpnMode.vpn;
   PerAppProxyMode _perAppMode = PerAppProxyMode.off;
   bool _debugMode = false;
-  String _pingTestUrl = 'http://connectivitycheck.gstatic.com/generate_204';
+  String _pingTestUrl = 'https://www.gstatic.com/generate_204';
   Map<String, dynamic> _coreInfo = {};
   String _coreEngine = 'xray';
   bool _switchingEngine = false;
@@ -59,7 +59,12 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _loadApps() async {
     try {
       final apps = await widget.v2rayBox.getInstalledApps();
-      if (mounted) setState(() { _apps = apps; _filteredApps = apps; _loadingApps = false; });
+      if (mounted)
+        setState(() {
+          _apps = apps;
+          _filteredApps = apps;
+          _loadingApps = false;
+        });
     } catch (_) {
       if (mounted) setState(() => _loadingApps = false);
     }
@@ -67,7 +72,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _saveSelectedApps() async {
     if (_perAppMode != PerAppProxyMode.off) {
-      await widget.v2rayBox.setPerAppProxyList(_selectedApps.toList(), _perAppMode);
+      await widget.v2rayBox.setPerAppProxyList(
+        _selectedApps.toList(),
+        _perAppMode,
+      );
     }
   }
 
@@ -78,7 +86,13 @@ class _SettingsPageState extends State<SettingsPage> {
         _filteredApps = _apps;
       } else {
         final lq = q.toLowerCase();
-        _filteredApps = _apps.where((a) => a.name.toLowerCase().contains(lq) || a.packageName.toLowerCase().contains(lq)).toList();
+        _filteredApps = _apps
+            .where(
+              (a) =>
+                  a.name.toLowerCase().contains(lq) ||
+                  a.packageName.toLowerCase().contains(lq),
+            )
+            .toList();
       }
     });
   }
@@ -95,8 +109,12 @@ class _SettingsPageState extends State<SettingsPage> {
           SliverPadding(
             padding: const EdgeInsets.all(16),
             sliver: SliverToBoxAdapter(
-              child: Text('Settings',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.white),
+              child: Text(
+                'Settings',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
               ),
             ),
           ),
@@ -112,8 +130,16 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: const EdgeInsets.all(16),
             sliver: SliverToBoxAdapter(
               child: _buildSection('Connection Mode', [
-                _buildRadioTile('VPN', 'Route all traffic through VPN tunnel', VpnMode.vpn),
-                _buildRadioTile('Proxy', 'Use as local proxy only', VpnMode.proxy),
+                _buildRadioTile(
+                  'VPN',
+                  'Route all traffic through VPN tunnel',
+                  VpnMode.vpn,
+                ),
+                _buildRadioTile(
+                  'Proxy',
+                  'Use as local proxy only',
+                  VpnMode.proxy,
+                ),
               ]),
             ),
           ),
@@ -125,7 +151,10 @@ class _SettingsPageState extends State<SettingsPage> {
               child: _buildSection('Advanced', [
                 SwitchListTile(
                   title: const Text('Debug Mode'),
-                  subtitle: Text('Verbose logging for troubleshooting', style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+                  subtitle: Text(
+                    'Verbose logging for troubleshooting',
+                    style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                  ),
                   value: _debugMode,
                   onChanged: (v) async {
                     await widget.v2rayBox.setDebugMode(v);
@@ -135,7 +164,11 @@ class _SettingsPageState extends State<SettingsPage> {
                 const Divider(height: 1),
                 ListTile(
                   title: const Text('Ping Test URL'),
-                  subtitle: Text(_pingTestUrl, style: TextStyle(color: Colors.grey[400], fontSize: 12), overflow: TextOverflow.ellipsis),
+                  subtitle: Text(
+                    _pingTestUrl,
+                    style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                   trailing: const Icon(Icons.edit, size: 18),
                   onTap: _showPingUrlDialog,
                 ),
@@ -148,8 +181,16 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: const EdgeInsets.all(16),
             sliver: SliverToBoxAdapter(
               child: _buildSection('Per-App Proxy', [
-                _buildPerAppTile('Off', 'All apps use VPN', PerAppProxyMode.off),
-                _buildPerAppTile('Exclude', 'Selected apps bypass VPN', PerAppProxyMode.exclude),
+                _buildPerAppTile(
+                  'Off',
+                  'All apps use VPN',
+                  PerAppProxyMode.off,
+                ),
+                _buildPerAppTile(
+                  'Exclude',
+                  'Selected apps bypass VPN',
+                  PerAppProxyMode.exclude,
+                ),
               ]),
             ),
           ),
@@ -164,8 +205,21 @@ class _SettingsPageState extends State<SettingsPage> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('Select Apps', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                        if (!_loadingApps) Text('${_filteredApps.length} apps', style: TextStyle(color: Colors.grey[400], fontSize: 14)),
+                        const Text(
+                          'Select Apps',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (!_loadingApps)
+                          Text(
+                            '${_filteredApps.length} apps',
+                            style: TextStyle(
+                              color: Colors.grey[400],
+                              fontSize: 14,
+                            ),
+                          ),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -176,11 +230,20 @@ class _SettingsPageState extends State<SettingsPage> {
                         hintText: 'Search apps...',
                         prefixIcon: const Icon(Icons.search),
                         suffixIcon: _searchQuery.isNotEmpty
-                            ? IconButton(icon: const Icon(Icons.clear), onPressed: () { _searchCtrl.clear(); _filterApps(''); })
+                            ? IconButton(
+                                icon: const Icon(Icons.clear),
+                                onPressed: () {
+                                  _searchCtrl.clear();
+                                  _filterApps('');
+                                },
+                              )
                             : null,
                         filled: true,
                         fillColor: const Color(0xFF1A1A2E),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -189,7 +252,9 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             if (_loadingApps)
-              const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
+              const SliverFillRemaining(
+                child: Center(child: CircularProgressIndicator()),
+              )
             else if (_filteredApps.isEmpty)
               SliverFillRemaining(
                 child: Center(
@@ -198,7 +263,12 @@ class _SettingsPageState extends State<SettingsPage> {
                     children: [
                       Icon(Icons.search_off, size: 48, color: Colors.grey[600]),
                       const SizedBox(height: 16),
-                      Text(_searchQuery.isEmpty ? 'No apps found' : 'No apps matching "$_searchQuery"', style: TextStyle(color: Colors.grey[400])),
+                      Text(
+                        _searchQuery.isEmpty
+                            ? 'No apps found'
+                            : 'No apps matching "$_searchQuery"',
+                        style: TextStyle(color: Colors.grey[400]),
+                      ),
                     ],
                   ),
                 ),
@@ -208,7 +278,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 sliver: SliverList(
                   delegate: SliverChildBuilderDelegate(
-                        (ctx, i) => _buildAppTile(_filteredApps[i]),
+                    (ctx, i) => _buildAppTile(_filteredApps[i]),
                     childCount: _filteredApps.length,
                   ),
                 ),
@@ -233,7 +303,7 @@ class _SettingsPageState extends State<SettingsPage> {
             TextField(
               controller: ctrl,
               decoration: const InputDecoration(
-                hintText: 'http://connectivitycheck.gstatic.com/generate_204',
+                hintText: 'https://www.gstatic.com/generate_204',
                 border: OutlineInputBorder(),
               ),
               keyboardType: TextInputType.url,
@@ -244,22 +314,30 @@ class _SettingsPageState extends State<SettingsPage> {
               children: [
                 ActionChip(
                   label: const Text('gstatic', style: TextStyle(fontSize: 12)),
-                  onPressed: () => ctrl.text = 'http://connectivitycheck.gstatic.com/generate_204',
+                  onPressed: () =>
+                      ctrl.text = 'https://www.gstatic.com/generate_204',
                 ),
                 ActionChip(
-                  label: const Text('Cloudflare', style: TextStyle(fontSize: 12)),
+                  label: const Text(
+                    'Cloudflare',
+                    style: TextStyle(fontSize: 12),
+                  ),
                   onPressed: () => ctrl.text = 'http://cp.cloudflare.com',
                 ),
                 ActionChip(
                   label: const Text('Google', style: TextStyle(fontSize: 12)),
-                  onPressed: () => ctrl.text = 'http://www.google.com/generate_204',
+                  onPressed: () =>
+                      ctrl.text = 'http://www.google.com/generate_204',
                 ),
               ],
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             onPressed: () async {
               final url = ctrl.text.trim();
@@ -296,10 +374,14 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() => _switchingEngine = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Switched to ${engine == 'singbox' ? 'sing-box' : 'Xray-core'}'),
+          content: Text(
+            'Switched to ${engine == 'singbox' ? 'sing-box' : 'Xray-core'}',
+          ),
           behavior: SnackBarBehavior.floating,
           backgroundColor: const Color(0xFF2D2D44),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
         ),
       );
     }
@@ -308,7 +390,9 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildCoreInfoCard() {
     final isXray = _coreEngine == 'xray';
     final engineName = isXray ? 'Xray-core' : 'sing-box';
-    final engineColor = isXray ? const Color(0xFF6C5CE7) : const Color(0xFFE84393);
+    final engineColor = isXray
+        ? const Color(0xFF6C5CE7)
+        : const Color(0xFFE84393);
 
     return Card(
       child: Padding(
@@ -331,7 +415,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Core Engine', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      const Text(
+                        'Core Engine',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
                       const SizedBox(height: 4),
                       Text(
                         engineName,
@@ -342,14 +432,21 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 if (_coreInfo['version'] != null)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFF2ED573).withOpacity(0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
                       'v${_coreInfo['version']}',
-                      style: const TextStyle(color: Color(0xFF2ED573), fontSize: 12, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                        color: Color(0xFF2ED573),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
               ],
@@ -382,7 +479,12 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _buildEngineButton(String label, String engine, Color color, bool selected) {
+  Widget _buildEngineButton(
+    String label,
+    String engine,
+    Color color,
+    bool selected,
+  ) {
     return GestureDetector(
       onTap: _switchingEngine ? null : () => _switchEngine(engine),
       child: AnimatedContainer(
@@ -401,7 +503,10 @@ class _SettingsPageState extends State<SettingsPage> {
               ? SizedBox(
                   width: 18,
                   height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: color),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: color,
+                  ),
                 )
               : Text(
                   label,
@@ -422,7 +527,10 @@ class _SettingsPageState extends State<SettingsPage> {
       children: [
         Padding(
           padding: const EdgeInsets.only(left: 4, bottom: 12),
-          child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          child: Text(
+            title,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
         ),
         Card(child: Column(children: children)),
       ],
@@ -432,7 +540,10 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildRadioTile(String title, String subtitle, VpnMode value) {
     return RadioListTile<VpnMode>(
       title: Text(title),
-      subtitle: Text(subtitle, style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+      subtitle: Text(
+        subtitle,
+        style: TextStyle(color: Colors.grey[400], fontSize: 12),
+      ),
       value: value,
       groupValue: _mode,
       onChanged: (v) async {
@@ -444,10 +555,17 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _buildPerAppTile(String title, String subtitle, PerAppProxyMode value) {
+  Widget _buildPerAppTile(
+    String title,
+    String subtitle,
+    PerAppProxyMode value,
+  ) {
     return RadioListTile<PerAppProxyMode>(
       title: Text(title),
-      subtitle: Text(subtitle, style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+      subtitle: Text(
+        subtitle,
+        style: TextStyle(color: Colors.grey[400], fontSize: 12),
+      ),
       value: value,
       groupValue: _perAppMode,
       onChanged: (v) async {
@@ -455,9 +573,15 @@ class _SettingsPageState extends State<SettingsPage> {
           await widget.v2rayBox.setPerAppProxyMode(v);
           if (v != PerAppProxyMode.off) {
             final list = await widget.v2rayBox.getPerAppProxyList(v);
-            setState(() { _perAppMode = v; _selectedApps = list.toSet(); });
+            setState(() {
+              _perAppMode = v;
+              _selectedApps = list.toSet();
+            });
           } else {
-            setState(() { _perAppMode = v; _selectedApps.clear(); });
+            setState(() {
+              _perAppMode = v;
+              _selectedApps.clear();
+            });
           }
         }
       },
@@ -469,16 +593,29 @@ class _SettingsPageState extends State<SettingsPage> {
     return Card(
       margin: const EdgeInsets.only(bottom: 4),
       child: CheckboxListTile(
-        title: Text(app.name, style: const TextStyle(fontSize: 14), overflow: TextOverflow.ellipsis),
-        subtitle: Text(app.packageName, style: TextStyle(color: Colors.grey[500], fontSize: 11), overflow: TextOverflow.ellipsis),
-        secondary: Icon(app.isSystemApp ? Icons.android : Icons.apps,
-          color: app.isSystemApp ? Colors.grey[600] : Colors.blue[400], size: 20,
+        title: Text(
+          app.name,
+          style: const TextStyle(fontSize: 14),
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          app.packageName,
+          style: TextStyle(color: Colors.grey[500], fontSize: 11),
+          overflow: TextOverflow.ellipsis,
+        ),
+        secondary: Icon(
+          app.isSystemApp ? Icons.android : Icons.apps,
+          color: app.isSystemApp ? Colors.grey[600] : Colors.blue[400],
+          size: 20,
         ),
         value: selected,
         onChanged: (v) async {
           setState(() {
-            if (v == true) { _selectedApps.add(app.packageName); }
-            else { _selectedApps.remove(app.packageName); }
+            if (v == true) {
+              _selectedApps.add(app.packageName);
+            } else {
+              _selectedApps.remove(app.packageName);
+            }
           });
           await _saveSelectedApps();
         },

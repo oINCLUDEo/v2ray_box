@@ -8,15 +8,21 @@ import java.net.URLDecoder
 
 object SingboxConfigParser {
     private const val TAG = "V2Ray/SingboxConfigParser"
+    private const val DNS_REMOTE_TAG = "dns-remote"
+    private const val DNS_DIRECT_TAG = "dns-direct"
+    private const val DNS_STRATEGY = "prefer_ipv4"
     private val gson: Gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
+    private val ipv4Regex = Regex(
+        """^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$"""
+    )
 
     fun buildSingboxConfig(link: String, enableTun: Boolean = false): String {
         val outbound = parseLink(link) ?: throw Exception("Invalid or unsupported config link")
 
         val config = mutableMapOf<String, Any>(
-            "log" to mapOf("level" to "info", "timestamp" to true),
+            "log" to mapOf("level" to "warn", "timestamp" to false),
             "dns" to buildDns(),
-            "inbounds" to buildInbounds(),
+            "inbounds" to buildInbounds(enableTun),
             "outbounds" to listOf(
                 outbound,
                 mapOf("type" to "direct", "tag" to "direct")
@@ -33,30 +39,45 @@ object SingboxConfigParser {
             "servers" to listOf(
                 mapOf(
                     "type" to "https",
-                    "tag" to "dns-remote",
+                    "tag" to DNS_REMOTE_TAG,
                     "server" to "1.1.1.1",
                     "server_port" to 443,
+                    "path" to "/dns-query",
                     "detour" to "proxy"
                 ),
                 mapOf(
                     "type" to "local",
-                    "tag" to "dns-direct"
+                    "tag" to DNS_DIRECT_TAG
                 )
             ),
-            "strategy" to "prefer_ipv4",
+            "strategy" to DNS_STRATEGY,
+            "final" to DNS_REMOTE_TAG,
+            "disable_expire" to true,
             "independent_cache" to true
         )
     }
 
-    private fun buildInbounds(): List<Map<String, Any>> {
-        return listOf(
-            mapOf(
-                "type" to "mixed",
-                "tag" to "mixed-in",
-                "listen" to "127.0.0.1",
-                "listen_port" to 10808
+    private fun buildInbounds(enableTun: Boolean): List<Map<String, Any>> {
+        val inbounds = mutableListOf<Map<String, Any>>()
+        if (enableTun) {
+            inbounds += mapOf(
+                "type" to "tun",
+                "tag" to "tun-in",
+                "interface_name" to "tun0",
+                "mtu" to 9000,
+                "address" to listOf("172.19.0.1/30", "fdfe:dcba:9876::1/126"),
+                "auto_route" to true,
+                "strict_route" to true,
+                "stack" to "mixed"
             )
+        }
+        inbounds += mapOf(
+            "type" to "mixed",
+            "tag" to "mixed-in",
+            "listen" to "127.0.0.1",
+            "listen_port" to 10808
         )
+        return inbounds
     }
 
     private fun buildRoute(): Map<String, Any> {
@@ -66,7 +87,10 @@ object SingboxConfigParser {
                 mapOf("protocol" to "dns", "action" to "hijack-dns"),
                 mapOf("ip_is_private" to true, "outbound" to "direct")
             ),
-            "default_domain_resolver" to mapOf("server" to "dns-direct"),
+            "default_domain_resolver" to mapOf(
+                "server" to DNS_DIRECT_TAG,
+                "strategy" to DNS_STRATEGY
+            ),
             "final" to "proxy"
         )
     }
@@ -75,6 +99,7 @@ object SingboxConfigParser {
         return mapOf(
             "cache_file" to mapOf(
                 "enabled" to true,
+                "path" to "cache.db",
                 "store_fakeip" to true
             ),
             "clash_api" to mapOf(
@@ -120,9 +145,47 @@ object SingboxConfigParser {
         return params[key]?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    private fun isDomainLike(value: String?): Boolean {
+    private fun normalizePath(path: String?): String? {
+        val value = path?.trim() ?: return null
+        if (value.isEmpty()) return "/"
+        return if (value.startsWith("/")) value else "/$value"
+    }
+
+    private fun normalizeGrpcServiceName(value: String?): String? {
+        val service = value?.trim()?.trim('/') ?: return null
+        return service.takeIf { it.isNotEmpty() }
+    }
+
+    private fun splitCsv(value: String?): List<String> {
+        if (value.isNullOrBlank()) return emptyList()
+        return value.split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+    }
+
+    private fun firstHostValue(value: String?): String? = splitCsv(value).firstOrNull()
+
+    private fun isIpAddress(value: String?): Boolean {
         if (value.isNullOrBlank()) return false
-        return value.any { it.isLetter() }
+        val host = value.trim().removePrefix("[").removeSuffix("]").substringBefore("%")
+        if (host.isEmpty()) return false
+        if (ipv4Regex.matches(host)) return true
+        if (!host.contains(":")) return false
+        return host.all { c ->
+            c == ':' || c == '.' || c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
+        }
+    }
+
+    private fun isDomainLike(value: String?): Boolean {
+        return !value.isNullOrBlank() && !isIpAddress(value)
+    }
+
+    private fun applyDefaultDomainResolver(outbound: MutableMap<String, Any>, server: String) {
+        if (!isDomainLike(server) || outbound.containsKey("domain_resolver")) return
+        outbound["domain_resolver"] = mapOf(
+            "server" to DNS_DIRECT_TAG,
+            "strategy" to DNS_STRATEGY
+        )
     }
 
     private fun parseFlexibleBool(value: String?): Boolean? {
@@ -144,16 +207,18 @@ object SingboxConfigParser {
         if (security != "tls" && security != "reality" && security != "xtls") return null
 
         val tls = mutableMapOf<String, Any>("enabled" to true)
+        val hostFromTransport = firstHostValue(getParam(params, "host") ?: vmessJson?.get("host")?.toString())
 
         val sni = getParam(params, "sni")
             ?: getParam(params, "peer")
             ?: vmessJson?.get("sni")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
             ?: defaultServerName?.takeIf { isDomainLike(it) }
+            ?: hostFromTransport?.takeIf { isDomainLike(it) }
         sni?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
 
         val alpn = getParam(params, "alpn") ?: vmessJson?.get("alpn")?.toString()
         alpn?.takeIf { it.isNotEmpty() }?.let {
-            tls["alpn"] = it.split(",").map { a -> a.trim() }
+            tls["alpn"] = it.split(",").map { a -> a.trim() }.filter { a -> a.isNotEmpty() }
         }
 
         val fp = getParam(params, "fp") ?: getParam(params, "fingerprint")
@@ -179,10 +244,11 @@ object SingboxConfigParser {
     }
 
     private fun buildMux(params: Map<String, String>): Map<String, Any>? {
-        val enabled = params["mux"]?.let { it == "1" || it == "true" } ?: return null
+        val enabled = parseFlexibleBool(getParam(params, "mux")) ?: return null
         if (!enabled) return null
         val mux = mutableMapOf<String, Any>("enabled" to true, "protocol" to "h2mux")
         params["mux-max-streams"]?.toIntOrNull()?.let { mux["max_streams"] = it }
+        parseFlexibleBool(getParam(params, "mux-padding"))?.let { mux["padding"] = it }
         return mux
     }
 
@@ -201,20 +267,20 @@ object SingboxConfigParser {
                     ?: "none").lowercase()
                 if (headerType != "http") return null
                 val transport = mutableMapOf<String, Any>("type" to "http")
-                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
-                path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                host?.takeIf { it.isNotEmpty() }?.let {
-                    transport["host"] = it.split(",").map { h -> h.trim() }.filter { h -> h.isNotEmpty() }
+                val path = normalizePath(getParam(params, "path") ?: vmessJson?.get("path")?.toString())
+                transport["path"] = path ?: "/"
+                val hostList = splitCsv(getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                if (hostList.isNotEmpty()) {
+                    transport["host"] = hostList
                 }
                 transport
             }
             "ws", "websocket" -> {
                 val transport = mutableMapOf<String, Any>("type" to "ws")
-                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
-                path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                host?.takeIf { it.isNotEmpty() }?.let {
+                val path = normalizePath(getParam(params, "path") ?: vmessJson?.get("path")?.toString())
+                transport["path"] = path ?: "/"
+                val host = firstHostValue(getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                host?.let {
                     transport["headers"] = mapOf("Host" to it)
                 }
                 getParam(params, "max-early-data")?.toIntOrNull()?.let { transport["max_early_data"] = it }
@@ -225,27 +291,35 @@ object SingboxConfigParser {
             }
             "grpc" -> {
                 val transport = mutableMapOf<String, Any>("type" to "grpc")
-                val sn = getParam(params, "serviceName") ?: getParam(params, "service-name")
-                    ?: vmessJson?.get("path")?.toString()
-                sn?.takeIf { it.isNotEmpty() }?.let { transport["service_name"] = it }
+                val serviceName = normalizeGrpcServiceName(
+                    getParam(params, "serviceName")
+                        ?: getParam(params, "service-name")
+                        ?: vmessJson?.get("path")?.toString()
+                )
+                serviceName?.let { transport["service_name"] = it }
+                getParam(params, "grpc-idle-timeout")?.let { transport["idle_timeout"] = it }
+                getParam(params, "grpc-ping-timeout")?.let { transport["ping_timeout"] = it }
+                parseFlexibleBool(getParam(params, "grpc-permit-without-stream"))?.let {
+                    transport["permit_without_stream"] = it
+                }
                 transport
             }
             "http", "h2" -> {
                 val transport = mutableMapOf<String, Any>("type" to "http")
-                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
-                path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                host?.takeIf { it.isNotEmpty() }?.let {
-                    transport["host"] = it.split(",").map { h -> h.trim() }
+                val path = normalizePath(getParam(params, "path") ?: vmessJson?.get("path")?.toString())
+                transport["path"] = path ?: "/"
+                val hostList = splitCsv(getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                if (hostList.isNotEmpty()) {
+                    transport["host"] = hostList
                 }
                 transport
             }
             "httpupgrade", "xhttp" -> {
                 val transport = mutableMapOf<String, Any>("type" to "httpupgrade")
-                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
-                path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
-                host?.takeIf { it.isNotEmpty() }?.let { transport["host"] = it }
+                val path = normalizePath(getParam(params, "path") ?: vmessJson?.get("path")?.toString())
+                transport["path"] = path ?: "/"
+                val host = firstHostValue(getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                host?.let { transport["host"] = it }
                 transport
             }
             "quic" -> mapOf("type" to "quic")
@@ -269,11 +343,13 @@ object SingboxConfigParser {
         )
 
         params["flow"]?.takeIf { it.isNotEmpty() }?.let { outbound["flow"] = it }
-        params["packet_encoding"]?.takeIf { it.isNotEmpty() }?.let { outbound["packet_encoding"] = it }
+        (getParam(params, "packet_encoding") ?: getParam(params, "packetEncoding"))
+            ?.let { outbound["packet_encoding"] = it }
 
         buildTransport(params)?.let { outbound["transport"] = it }
         buildTls(params, defaultServerName = server)?.let { outbound["tls"] = it }
         buildMux(params)?.let { outbound["multiplex"] = it }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -315,6 +391,10 @@ object SingboxConfigParser {
         json["alpn"]?.toString()?.let { tlsParams["alpn"] = it }
         json["fp"]?.toString()?.let { tlsParams["fp"] = it }
         buildTls(tlsParams, json, defaultServerName = server)?.let { outbound["tls"] = it }
+        json["packetEncoding"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            outbound["packet_encoding"] = it
+        }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -338,6 +418,10 @@ object SingboxConfigParser {
 
         buildTls(params, defaultServerName = server)?.let { outbound["tls"] = it }
         buildTransport(params)?.let { outbound["transport"] = it }
+        buildMux(params)?.let { outbound["multiplex"] = it }
+        (getParam(params, "packet_encoding") ?: getParam(params, "packetEncoding"))
+            ?.let { outbound["packet_encoding"] = it }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -366,6 +450,7 @@ object SingboxConfigParser {
         buildTls(tlsParams, defaultServerName = server)?.let { outbound["tls"] = it }
             ?: run { outbound["tls"] = mapOf("enabled" to true) }
         buildMux(params)?.let { outbound["multiplex"] = it }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -439,6 +524,7 @@ object SingboxConfigParser {
             outbound["plugin"] = pluginParts[0]
             if (pluginParts.size > 1) outbound["plugin_opts"] = pluginParts[1]
         }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -474,6 +560,7 @@ object SingboxConfigParser {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
         }
         outbound["tls"] = tls
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -517,6 +604,7 @@ object SingboxConfigParser {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
         }
         outbound["tls"] = tls
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -557,6 +645,7 @@ object SingboxConfigParser {
             if (it) tls["insecure"] = true
         }
         outbound["tls"] = tls
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -586,6 +675,7 @@ object SingboxConfigParser {
             if (bytes.isNotEmpty()) outbound["reserved"] = bytes
         }
         params["mtu"]?.toIntOrNull()?.let { outbound["mtu"] = it }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }
@@ -616,6 +706,7 @@ object SingboxConfigParser {
         params["hk"]?.takeIf { it.isNotEmpty() }?.let {
             outbound["host_key"] = it.split(",").map { k -> k.trim() }
         }
+        applyDefaultDomainResolver(outbound, server)
 
         return outbound
     }

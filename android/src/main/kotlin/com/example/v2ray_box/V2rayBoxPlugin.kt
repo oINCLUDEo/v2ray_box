@@ -49,7 +49,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import libv2ray.CoreCallbackHandler
 import libv2ray.Libv2ray
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -91,6 +90,10 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private const val STATS_CHANNEL = "v2ray_box/stats"
         private const val PING_CHANNEL = "v2ray_box/ping"
         private const val LOGS_CHANNEL = "v2ray_box/logs"
+        private const val DEFAULT_PING_TIMEOUT_MS = 7000
+        private const val MIN_PING_TIMEOUT_MS = 1000
+        private const val PING_TASK_GRACE_MS = 1200L
+        private const val PING_MAX_PARALLEL_TASKS = 4
 
         const val VPN_PERMISSION_REQUEST_CODE = 1001
         const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1010
@@ -594,7 +597,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     result.runCatching {
                         val args = call.arguments as Map<*, *>
                         val link = args["link"] as String
-                        val timeout = (args["timeout"] as? Int) ?: 5000
+                        val timeout = parsePingTimeout(args["timeout"])
 
                         try {
                             val delay = testConfigLink(link, timeout)
@@ -613,7 +616,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val args = call.arguments as Map<*, *>
                         @Suppress("UNCHECKED_CAST")
                         val links = args["links"] as List<String>
-                        val timeout = (args["timeout"] as? Int) ?: 5000
+                        val timeout = parsePingTimeout(args["timeout"])
 
                         val results = testConfigLinksParallel(links, timeout)
                         success(results)
@@ -951,72 +954,35 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         @SerializedName("is-system-app") val isSystemApp: Boolean
     )
 
-    private val pingLock = Object()
-    private var pingPort = 10100
-
     private fun testConfigLink(link: String, timeout: Int): Long {
         val outbound = XrayConfigParser.parseLink(link) ?: run {
             Log.e(TAG, "Ping: failed to parse config link")
             return -1L
         }
-
-        synchronized(pingLock) {
-            val port = pingPort
-            pingPort += 2
-            if (pingPort > 60000) pingPort = 10100
-
-            val config = buildPingConfig(outbound, port)
-            var controller: libv2ray.CoreController? = null
-            try {
-                val handler = object : CoreCallbackHandler {
-                    override fun startup(): Long = 0
-                    override fun shutdown(): Long = 0
-                    override fun onEmitStatus(status: Long, message: String?): Long = 0
-                }
-                controller = Libv2ray.newCoreController(handler)
-                controller.startLoop(config, 0)
-                Thread.sleep(500)
-
-                val startTime = System.currentTimeMillis()
-                val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", port))
-                val url = java.net.URL(Settings.pingTestUrl)
-                val conn = url.openConnection(proxy) as java.net.HttpURLConnection
-                conn.connectTimeout = timeout
-                conn.readTimeout = timeout
-                conn.requestMethod = "HEAD"
-                conn.instanceFollowRedirects = false
-                try {
-                    conn.connect()
-                    conn.responseCode
-                    val elapsed = System.currentTimeMillis() - startTime
-                    Log.d(TAG, "Ping OK: ${elapsed}ms via port $port")
-                    return elapsed
-                } finally {
-                    conn.disconnect()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Ping failed: ${e.message}")
-                return -1L
-            } finally {
-                try {
-                    controller?.stopLoop()
-                    Thread.sleep(300)
-                } catch (_: Exception) {}
-            }
+        ensureCoreEnvInitializedForPing()
+        val config = buildPingMeasureConfig(outbound)
+        val measured = measureOutboundDelayWithTimeout(config, Settings.pingTestUrl, timeout)
+        val normalized = normalizeDelayValue(measured)
+        if (normalized >= 0L) {
+            Log.d(TAG, "Ping OK: ${normalized}ms")
+        } else {
+            Log.e(TAG, "Ping failed")
         }
+        return normalized
     }
 
     private fun testConfigLinksParallel(links: List<String>, timeout: Int): Map<String, Long> {
         val results = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        val effectiveTimeout = timeout.coerceAtLeast(MIN_PING_TIMEOUT_MS)
 
-        data class ParsedEntry(val link: String, val outbound: Map<String, Any>, val index: Int)
+        data class ParsedEntry(val link: String, val outbound: Map<String, Any>)
 
         val parsed = mutableListOf<ParsedEntry>()
         val mainHandler0 = android.os.Handler(android.os.Looper.getMainLooper())
-        links.forEachIndexed { i, link ->
+        links.forEach { link ->
             val outbound = XrayConfigParser.parseLink(link)
             if (outbound != null) {
-                parsed.add(ParsedEntry(link, outbound, i))
+                parsed.add(ParsedEntry(link, outbound))
             } else {
                 results[link] = -1L
                 mainHandler0.post {
@@ -1027,135 +993,124 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
         if (parsed.isEmpty()) return results
 
-        synchronized(pingLock) {
-            val basePort = pingPort
-            pingPort += parsed.size * 2 + 2
-            if (pingPort > 60000) pingPort = 10100
+        ensureCoreEnvInitializedForPing()
 
-            val taggedOutbounds = parsed.map { entry ->
-                val ob = entry.outbound.toMutableMap()
-                ob["tag"] = "proxy-${entry.index}"
-                ob
-            }
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        val threadCount = minOf(parsed.size, PING_MAX_PARALLEL_TASKS)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount)
+        val latch = java.util.concurrent.CountDownLatch(parsed.size)
+        val batches = (parsed.size + threadCount - 1) / threadCount
+        val waitTimeoutMs = (batches.toLong() * (effectiveTimeout.toLong() + PING_TASK_GRACE_MS)) + 4000L
 
-            val inbounds = parsed.mapIndexed { idx, entry ->
-                mapOf(
-                    "tag" to "socks-${entry.index}",
-                    "port" to (basePort + idx * 2),
-                    "listen" to "127.0.0.1",
-                    "protocol" to "socks",
-                    "settings" to mapOf("auth" to "noauth", "udp" to true)
-                )
-            }
-
-            val routeRules = parsed.mapIndexed { idx, entry ->
-                mapOf(
-                    "type" to "field",
-                    "inboundTag" to listOf("socks-${entry.index}"),
-                    "outboundTag" to "proxy-${entry.index}"
-                )
-            }
-
-            val allOutbounds = taggedOutbounds + listOf(
-                mapOf("tag" to "direct", "protocol" to "freedom", "settings" to mapOf<String, Any>())
-            )
-
-            val config = mapOf(
-                "log" to mapOf("loglevel" to "error"),
-                "inbounds" to inbounds,
-                "outbounds" to allOutbounds,
-                "routing" to mapOf(
-                    "rules" to routeRules
-                )
-            )
-            val configJson = gson.toJson(config)
-
-            var controller: libv2ray.CoreController? = null
-            try {
-                val handler = object : CoreCallbackHandler {
-                    override fun startup(): Long = 0
-                    override fun shutdown(): Long = 0
-                    override fun onEmitStatus(status: Long, message: String?): Long = 0
-                }
-                controller = Libv2ray.newCoreController(handler)
-                controller.startLoop(configJson, 0)
-
-                Thread.sleep(500)
-
-                val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-                val threadCount = minOf(parsed.size, 8)
-                val executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount)
-                val latch = java.util.concurrent.CountDownLatch(parsed.size)
-                parsed.forEachIndexed { idx, entry ->
-                    executor.submit {
-                        val port = basePort + idx * 2
-                        try {
-                            val startTime = System.currentTimeMillis()
-                            val proxy = java.net.Proxy(
-                                java.net.Proxy.Type.SOCKS,
-                                java.net.InetSocketAddress("127.0.0.1", port)
-                            )
-                            val url = java.net.URL(Settings.pingTestUrl)
-                            val conn = url.openConnection(proxy) as java.net.HttpURLConnection
-                            conn.connectTimeout = timeout
-                            conn.readTimeout = timeout
-                            conn.requestMethod = "HEAD"
-                            conn.instanceFollowRedirects = false
-                            try {
-                                conn.connect()
-                                conn.responseCode
-                                val elapsed = System.currentTimeMillis() - startTime
-                                Log.d(TAG, "Ping OK: ${elapsed}ms for proxy-${entry.index} via port $port")
-                                results[entry.link] = elapsed
-                                mainHandler.post {
-                                    pingEventSink?.success(mapOf("link" to entry.link, "latency" to elapsed))
-                                }
-                            } finally {
-                                conn.disconnect()
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Ping failed for proxy-${entry.index}: ${e.message}")
-                            results[entry.link] = -1L
-                            mainHandler.post {
-                                pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
-                            }
-                        } finally {
-                            latch.countDown()
-                        }
-                    }
-                }
-                latch.await((timeout + 5000).toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
-                executor.shutdown()
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Parallel ping setup failed: ${e.message}")
-                parsed.forEach { results.putIfAbsent(it.link, -1L) }
-            } finally {
+        parsed.forEach { entry ->
+            executor.submit {
                 try {
-                    controller?.stopLoop()
-                    Thread.sleep(300)
-                } catch (_: Exception) {}
+                    val config = buildPingMeasureConfig(entry.outbound)
+                    val measured = measureOutboundDelayWithTimeout(
+                        config,
+                        Settings.pingTestUrl,
+                        effectiveTimeout
+                    )
+                    val elapsed = normalizeDelayValue(measured)
+                    results[entry.link] = elapsed
+                    mainHandler.post {
+                        pingEventSink?.success(mapOf("link" to entry.link, "latency" to elapsed))
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Ping failed for ${entry.link}: ${e.message}")
+                    results[entry.link] = -1L
+                    mainHandler.post {
+                        pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+                    }
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        val completed = latch.await(waitTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        if (!completed) {
+            Log.w(TAG, "Parallel ping timed out after ${waitTimeoutMs}ms")
+        }
+        executor.shutdownNow()
+
+        // Ensure caller always receives a result for each input link.
+        parsed.forEach { entry ->
+            if (!results.containsKey(entry.link)) {
+                results[entry.link] = -1L
+                mainHandler.post {
+                    pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+                }
             }
         }
 
         return results
     }
 
-    private fun buildPingConfig(outbound: Map<String, Any>, socksPort: Int): String {
+    private fun ensureCoreEnvInitializedForPing() {
+        val context = applicationContext ?: return
+        val workingDir = context.getExternalFilesDir(null) ?: context.filesDir
+        workingDir.mkdirs()
+        runCatching {
+            Libv2ray.initCoreEnv(workingDir.path, "")
+        }
+    }
+
+    private fun parsePingTimeout(value: Any?): Int {
+        val timeout = (value as? Number)?.toInt() ?: DEFAULT_PING_TIMEOUT_MS
+        return timeout.coerceAtLeast(MIN_PING_TIMEOUT_MS)
+    }
+
+    private fun measureOutboundDelayWithTimeout(configJson: String, testUrl: String, timeoutMs: Int): Long {
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val future = executor.submit<Long> {
+            measureOutboundDelay(configJson, testUrl)
+        }
+        return try {
+            future.get(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            Log.w(TAG, "measureOutboundDelay timeout after ${timeoutMs}ms")
+            -1L
+        } catch (e: Exception) {
+            Log.e(TAG, "measureOutboundDelayWithTimeout failed: ${e.message}")
+            -1L
+        } finally {
+            future.cancel(true)
+            executor.shutdownNow()
+        }
+    }
+
+    private fun measureOutboundDelay(configJson: String, testUrl: String): Long {
+        return try {
+            Libv2ray.measureOutboundDelay(configJson, testUrl)
+        } catch (e: Exception) {
+            Log.e(TAG, "measureOutboundDelay failed: ${e.message}")
+            -1L
+        }
+    }
+
+    private fun normalizeDelayValue(delayMs: Long): Long {
+        return if (delayMs <= 0L || delayMs >= 65000L) -1L else delayMs
+    }
+
+    private fun buildPingMeasureConfig(outbound: Map<String, Any>): String {
+        val speedtestOutbound = outbound.toMutableMap().apply {
+            remove("mux")
+        }
         val config = mapOf(
-            "log" to mapOf("loglevel" to "error"),
-            "inbounds" to listOf(
-                mapOf(
-                    "tag" to "socks-in",
-                    "port" to socksPort,
-                    "listen" to "127.0.0.1",
-                    "protocol" to "socks",
-                    "settings" to mapOf("auth" to "noauth", "udp" to true)
-                )
-            ),
+            "log" to mapOf("loglevel" to "warning"),
             "outbounds" to listOf(
-                outbound,
-                mapOf("tag" to "direct", "protocol" to "freedom", "settings" to mapOf<String, Any>())
+                speedtestOutbound,
+                mapOf(
+                    "tag" to "direct",
+                    "protocol" to "freedom",
+                    "settings" to mapOf("domainStrategy" to "UseIP")
+                ),
+                mapOf(
+                    "tag" to "block",
+                    "protocol" to "blackhole",
+                    "settings" to mapOf("response" to mapOf("type" to "http"))
+                )
             )
         )
         return gson.toJson(config)

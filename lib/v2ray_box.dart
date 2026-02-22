@@ -36,7 +36,10 @@ class V2rayBox {
   /// Must be called before any other methods
   /// [notificationStopButtonText] - Custom text for the stop button in notification (default: "Stop")
   /// [notificationIconName] - Custom notification icon name (drawable resource name without extension). If not set, app's default icon will be used.
-  Future<void> initialize({String? notificationStopButtonText, String? notificationIconName}) async {
+  Future<void> initialize({
+    String? notificationStopButtonText,
+    String? notificationIconName,
+  }) async {
     if (_isInitialized) return;
     await V2rayBoxPlatform.instance.setup();
     await setConfigOptions(_configOptions);
@@ -70,7 +73,9 @@ class V2rayBox {
   /// Set configuration options for the VPN service
   Future<bool> setConfigOptions(ConfigOptions options) async {
     _configOptions = options;
-    return V2rayBoxPlatform.instance.changeConfigOptions(options.toJsonString());
+    return V2rayBoxPlatform.instance.changeConfigOptions(
+      options.toJsonString(),
+    );
   }
 
   /// Get current configuration options
@@ -91,7 +96,11 @@ class V2rayBox {
   /// [configLink] - The config link (vless://, vmess://, etc.)
   /// [name] - Display name for the profile (used as notification title if notificationTitle not set)
   /// [notificationTitle] - Optional custom notification title
-  Future<bool> connect(String configLink, {String name = '', String? notificationTitle}) async {
+  Future<bool> connect(
+    String configLink, {
+    String name = '',
+    String? notificationTitle,
+  }) async {
     if (notificationTitle != null) {
       await setNotificationTitle(notificationTitle);
     } else {
@@ -134,13 +143,15 @@ class V2rayBox {
 
   /// Test URL connectivity and return latency in milliseconds
   /// Returns -1 if the test fails
-  Future<int> ping(String link, {int timeout = 5000}) {
+  /// [timeout] is optional, defaults to 7000 ms
+  Future<int> ping(String link, {int timeout = 7000}) {
     return V2rayBoxPlatform.instance.urlTest(link, timeout: timeout);
   }
 
   /// Test multiple URLs simultaneously and return latencies
   /// Returns a map of link -> latency in milliseconds
-  Future<Map<String, int>> pingAll(List<String> links, {int timeout = 5000}) {
+  /// [timeout] is optional, defaults to 7000 ms per config
+  Future<Map<String, int>> pingAll(List<String> links, {int timeout = 7000}) {
     return V2rayBoxPlatform.instance.urlTestAll(links, timeout: timeout);
   }
 
@@ -322,7 +333,7 @@ class V2rayBox {
   }
 
   /// Set the URL used for ping/latency testing
-  /// Default is "http://connectivitycheck.gstatic.com/generate_204"
+  /// Default is "https://www.gstatic.com/generate_204"
   Future<bool> setPingTestUrl(String url) {
     return V2rayBoxPlatform.instance.setPingTestUrl(url);
   }
