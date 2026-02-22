@@ -17,7 +17,8 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
 
     companion object {
         private const val TAG = "V2Ray/VPNService"
-        private const val TUN_MTU = 9000
+        // Keep MTU conservative to avoid fragmentation/instability on mobile networks.
+        private const val TUN_MTU = 1500
         private const val TUN_ADDR4 = "26.26.26.1"
         private const val TUN_ADDR6 = "da26:2626::1"
     }

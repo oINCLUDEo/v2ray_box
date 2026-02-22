@@ -1,3 +1,10 @@
+## Unreleased
+
+* Android: improved Xray/Sing-box config normalization for V2Ray links with empty or legacy query fields.
+* Android: fixed VLESS/VMess/Trojan handling for `tcp + headerType=http`, TLS/Reality defaults, and SNI fallback behavior.
+* Android: improved gRPC and insecure flag parsing compatibility (`allowInsecure` / `insecure`).
+* Android: reduced VPN TUN MTU from `9000` to `1500` for better mobile network stability.
+
 ## 1.0.0
 
 * **Dual-core support** — Xray-core and sing-box with runtime switching via `setCoreEngine()` / `getCoreEngine()`

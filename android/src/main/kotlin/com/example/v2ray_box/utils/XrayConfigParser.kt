@@ -178,21 +178,88 @@ object XrayConfigParser {
         return params
     }
 
-    private fun buildStreamSettings(params: Map<String, String>, vmessJson: Map<*, *>? = null): Map<String, Any> {
+    private fun getParam(params: Map<String, String>, key: String): String? {
+        return params[key]?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun isDomainLike(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        return value.any { it.isLetter() }
+    }
+
+    private fun parseFlexibleBool(value: String?): Boolean? {
+        return when (value?.trim()?.lowercase()) {
+            "1", "true", "yes", "on" -> true
+            "0", "false", "no", "off" -> false
+            else -> null
+        }
+    }
+
+    private fun buildStreamSettings(
+        params: Map<String, String>,
+        vmessJson: Map<*, *>? = null,
+        defaultServerName: String? = null
+    ): Map<String, Any> {
         val stream = mutableMapOf<String, Any>()
-        val networkType = params["type"] ?: vmessJson?.get("net")?.toString() ?: "tcp"
+        val networkTypeRaw = getParam(params, "type") ?: vmessJson?.get("net")?.toString() ?: "tcp"
+        val networkType = when (networkTypeRaw.lowercase()) {
+            "websocket" -> "ws"
+            "mkcp" -> "kcp"
+            else -> networkTypeRaw.lowercase()
+        }
         stream["network"] = networkType
 
-        val security = params["security"]
+        val security = getParam(params, "security")
             ?: if (vmessJson?.get("tls")?.toString() == "tls") "tls" else "none"
         stream["security"] = security
 
         when (networkType) {
+            "tcp" -> {
+                val headerType = (getParam(params, "headerType")
+                    ?: getParam(params, "header-type")
+                    ?: vmessJson?.get("type")?.toString()
+                    ?: "none").lowercase()
+
+                val tcpHeader = mutableMapOf<String, Any>("type" to headerType)
+                if (headerType == "http") {
+                    val hostList = (getParam(params, "host") ?: vmessJson?.get("host")?.toString())
+                        ?.split(",")
+                        ?.map { it.trim() }
+                        ?.filter { it.isNotEmpty() }
+                    val pathList = (getParam(params, "path") ?: vmessJson?.get("path")?.toString())
+                        ?.split(",")
+                        ?.map { it.trim() }
+                        ?.filter { it.isNotEmpty() }
+                        ?.ifEmpty { listOf("/") }
+                        ?: listOf("/")
+
+                    val requestHeaders = mutableMapOf<String, Any>(
+                        "User-Agent" to listOf(
+                            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"
+                        ),
+                        "Accept-Encoding" to listOf("gzip, deflate"),
+                        "Connection" to listOf("keep-alive"),
+                        "Pragma" to "no-cache"
+                    )
+                    if (!hostList.isNullOrEmpty()) {
+                        requestHeaders["Host"] = hostList
+                    }
+
+                    tcpHeader["request"] = mapOf(
+                        "version" to "1.1",
+                        "method" to "GET",
+                        "path" to pathList,
+                        "headers" to requestHeaders
+                    )
+                }
+
+                stream["tcpSettings"] = mapOf("header" to tcpHeader)
+            }
             "ws", "websocket" -> {
                 val wsSettings = mutableMapOf<String, Any>()
-                val path = params["path"] ?: vmessJson?.get("path")?.toString() ?: "/"
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString() ?: "/"
                 wsSettings["path"] = path
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) {
                     wsSettings["headers"] = mapOf("Host" to host)
                 }
@@ -200,17 +267,20 @@ object XrayConfigParser {
             }
             "grpc" -> {
                 val grpcSettings = mutableMapOf<String, Any>()
-                val sn = params["serviceName"] ?: params["service-name"]
+                val sn = getParam(params, "serviceName") ?: getParam(params, "service-name")
                     ?: vmessJson?.get("path")?.toString()
                 if (!sn.isNullOrEmpty()) grpcSettings["serviceName"] = sn
-                params["mode"]?.takeIf { it.isNotEmpty() }?.let { grpcSettings["multiMode"] = (it == "multi") }
+                getParam(params, "mode")?.let { mode ->
+                    if (mode == "multi") grpcSettings["multiMode"] = true
+                }
+                getParam(params, "authority")?.let { grpcSettings["authority"] = it }
                 stream["grpcSettings"] = grpcSettings
             }
             "h2", "http" -> {
                 val httpSettings = mutableMapOf<String, Any>()
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 if (!path.isNullOrEmpty()) httpSettings["path"] = path
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) {
                     httpSettings["host"] = host.split(",").map { it.trim() }
                 }
@@ -219,35 +289,35 @@ object XrayConfigParser {
             }
             "httpupgrade" -> {
                 val huSettings = mutableMapOf<String, Any>()
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 if (!path.isNullOrEmpty()) huSettings["path"] = path
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) huSettings["host"] = host
                 stream["httpupgradeSettings"] = huSettings
             }
             "splithttp", "xhttp" -> {
                 val shSettings = mutableMapOf<String, Any>()
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 if (!path.isNullOrEmpty()) shSettings["path"] = path
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) shSettings["host"] = host
-                params["mode"]?.takeIf { it.isNotEmpty() }?.let { shSettings["mode"] = it }
+                getParam(params, "mode")?.let { shSettings["mode"] = it }
                 stream["splithttpSettings"] = shSettings
                 stream["network"] = "splithttp"
             }
             "quic" -> {
                 val quicSettings = mutableMapOf<String, Any>(
-                    "security" to (params["quicSecurity"] ?: "none"),
-                    "header" to mapOf("type" to (params["headerType"] ?: "none"))
+                    "security" to (getParam(params, "quicSecurity") ?: "none"),
+                    "header" to mapOf("type" to (getParam(params, "headerType") ?: "none"))
                 )
-                params["key"]?.takeIf { it.isNotEmpty() }?.let { quicSettings["key"] = it }
+                getParam(params, "key")?.let { quicSettings["key"] = it }
                 stream["quicSettings"] = quicSettings
             }
             "kcp", "mkcp" -> {
                 val kcpSettings = mutableMapOf<String, Any>(
-                    "header" to mapOf("type" to (params["headerType"] ?: "none"))
+                    "header" to mapOf("type" to (getParam(params, "headerType") ?: "none"))
                 )
-                params["seed"]?.takeIf { it.isNotEmpty() }?.let { kcpSettings["seed"] = it }
+                getParam(params, "seed")?.let { kcpSettings["seed"] = it }
                 stream["kcpSettings"] = kcpSettings
                 stream["network"] = "kcp"
             }
@@ -256,28 +326,33 @@ object XrayConfigParser {
         when (security) {
             "tls" -> {
                 val tlsSettings = mutableMapOf<String, Any>()
-                val sni = params["sni"] ?: params["peer"] ?: vmessJson?.get("sni")?.toString()
+                val sni = getParam(params, "sni")
+                    ?: getParam(params, "peer")
+                    ?: vmessJson?.get("sni")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: defaultServerName?.takeIf { isDomainLike(it) }
                 if (!sni.isNullOrEmpty()) tlsSettings["serverName"] = sni
-                val alpn = params["alpn"] ?: vmessJson?.get("alpn")?.toString()
+                val alpn = getParam(params, "alpn") ?: vmessJson?.get("alpn")?.toString()
                 if (!alpn.isNullOrEmpty()) {
                     tlsSettings["alpn"] = alpn.split(",").map { it.trim() }
                 }
-                val fp = params["fp"] ?: params["fingerprint"]
+                val fp = getParam(params, "fp") ?: getParam(params, "fingerprint")
                 if (!fp.isNullOrEmpty()) tlsSettings["fingerprint"] = fp
-                params["allowInsecure"]?.let {
-                    if (it == "1" || it == "true") tlsSettings["allowInsecure"] = true
+                parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+                    if (it) tlsSettings["allowInsecure"] = true
                 }
                 stream["tlsSettings"] = tlsSettings
             }
             "reality" -> {
                 val realitySettings = mutableMapOf<String, Any>()
-                val sni = params["sni"] ?: params["peer"]
+                val sni = getParam(params, "sni")
+                    ?: getParam(params, "peer")
+                    ?: defaultServerName?.takeIf { isDomainLike(it) }
                 if (!sni.isNullOrEmpty()) realitySettings["serverName"] = sni
-                val fp = params["fp"] ?: params["fingerprint"] ?: "chrome"
+                val fp = getParam(params, "fp") ?: getParam(params, "fingerprint") ?: "chrome"
                 realitySettings["fingerprint"] = fp
-                params["pbk"]?.takeIf { it.isNotEmpty() }?.let { realitySettings["publicKey"] = it }
-                params["sid"]?.takeIf { it.isNotEmpty() }?.let { realitySettings["shortId"] = it }
-                params["spx"]?.takeIf { it.isNotEmpty() }?.let { realitySettings["spiderX"] = it }
+                getParam(params, "pbk")?.let { realitySettings["publicKey"] = it }
+                getParam(params, "sid")?.let { realitySettings["shortId"] = it }
+                getParam(params, "spx")?.let { realitySettings["spiderX"] = it }
                 stream["realitySettings"] = realitySettings
             }
         }
@@ -296,7 +371,7 @@ object XrayConfigParser {
 
         val user = mutableMapOf<String, Any>(
             "id" to uuid,
-            "encryption" to (params["encryption"] ?: "none"),
+            "encryption" to (getParam(params, "encryption") ?: "none"),
             "level" to 0
         )
         params["flow"]?.takeIf { it.isNotEmpty() }?.let { user["flow"] = it }
@@ -313,7 +388,7 @@ object XrayConfigParser {
                     )
                 )
             ),
-            "streamSettings" to buildStreamSettings(params)
+            "streamSettings" to buildStreamSettings(params, defaultServerName = server)
         )
 
         return outbound
@@ -366,7 +441,7 @@ object XrayConfigParser {
                     )
                 )
             ),
-            "streamSettings" to buildStreamSettings(params, json)
+            "streamSettings" to buildStreamSettings(params, json, defaultServerName = server)
         )
 
         return outbound
@@ -398,7 +473,7 @@ object XrayConfigParser {
                     )
                 )
             ),
-            "streamSettings" to buildStreamSettings(params)
+            "streamSettings" to buildStreamSettings(params, defaultServerName = server)
         )
 
         return outbound
@@ -412,7 +487,7 @@ object XrayConfigParser {
         val params = parseQueryParams(uri)
 
         val tlsParams = params.toMutableMap()
-        if (!tlsParams.containsKey("security")) {
+        if (tlsParams["security"].isNullOrBlank()) {
             tlsParams["security"] = "tls"
         }
 
@@ -429,7 +504,7 @@ object XrayConfigParser {
                     )
                 )
             ),
-            "streamSettings" to buildStreamSettings(tlsParams)
+            "streamSettings" to buildStreamSettings(tlsParams, defaultServerName = server)
         )
 
         return outbound
@@ -528,9 +603,9 @@ object XrayConfigParser {
 
         val stream = mutableMapOf<String, Any>("network" to "tcp", "security" to "tls")
         val tlsSettings = mutableMapOf<String, Any>()
-        params["sni"]?.takeIf { it.isNotEmpty() }?.let { tlsSettings["serverName"] = it }
-        params["insecure"]?.let {
-            if (it == "1" || it == "true") tlsSettings["allowInsecure"] = true
+        (getParam(params, "sni") ?: server.takeIf { isDomainLike(it) })?.let { tlsSettings["serverName"] = it }
+        parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+            if (it) tlsSettings["allowInsecure"] = true
         }
         params["alpn"]?.takeIf { it.isNotEmpty() }?.let {
             tlsSettings["alpn"] = it.split(",").map { a -> a.trim() }

@@ -116,35 +116,59 @@ object SingboxConfigParser {
         return params
     }
 
-    private fun buildTls(params: Map<String, String>, vmessJson: Map<*, *>? = null): Map<String, Any>? {
-        val security = params["security"]
+    private fun getParam(params: Map<String, String>, key: String): String? {
+        return params[key]?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun isDomainLike(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        return value.any { it.isLetter() }
+    }
+
+    private fun parseFlexibleBool(value: String?): Boolean? {
+        return when (value?.trim()?.lowercase()) {
+            "1", "true", "yes", "on" -> true
+            "0", "false", "no", "off" -> false
+            else -> null
+        }
+    }
+
+    private fun buildTls(
+        params: Map<String, String>,
+        vmessJson: Map<*, *>? = null,
+        defaultServerName: String? = null
+    ): Map<String, Any>? {
+        val security = getParam(params, "security")
             ?: if (vmessJson?.get("tls")?.toString() == "tls") "tls" else null
 
         if (security != "tls" && security != "reality" && security != "xtls") return null
 
         val tls = mutableMapOf<String, Any>("enabled" to true)
 
-        val sni = params["sni"] ?: params["peer"] ?: vmessJson?.get("sni")?.toString()
+        val sni = getParam(params, "sni")
+            ?: getParam(params, "peer")
+            ?: vmessJson?.get("sni")?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: defaultServerName?.takeIf { isDomainLike(it) }
         sni?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
 
-        val alpn = params["alpn"] ?: vmessJson?.get("alpn")?.toString()
+        val alpn = getParam(params, "alpn") ?: vmessJson?.get("alpn")?.toString()
         alpn?.takeIf { it.isNotEmpty() }?.let {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
         }
 
-        val fp = params["fp"] ?: params["fingerprint"]
+        val fp = getParam(params, "fp") ?: getParam(params, "fingerprint")
         fp?.takeIf { it.isNotEmpty() }?.let {
             tls["utls"] = mapOf("enabled" to true, "fingerprint" to it)
         }
 
-        params["allowInsecure"]?.let {
-            if (it == "1" || it == "true") tls["insecure"] = true
+        parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+            if (it) tls["insecure"] = true
         }
 
         if (security == "reality") {
             val reality = mutableMapOf<String, Any>("enabled" to true)
-            params["pbk"]?.takeIf { it.isNotEmpty() }?.let { reality["public_key"] = it }
-            params["sid"]?.takeIf { it.isNotEmpty() }?.let { reality["short_id"] = it }
+            getParam(params, "pbk")?.let { reality["public_key"] = it }
+            getParam(params, "sid")?.let { reality["short_id"] = it }
             tls["reality"] = reality
             if (!tls.containsKey("utls")) {
                 tls["utls"] = mapOf("enabled" to true, "fingerprint" to (fp ?: "chrome"))
@@ -163,36 +187,54 @@ object SingboxConfigParser {
     }
 
     private fun buildTransport(params: Map<String, String>, vmessJson: Map<*, *>? = null): Map<String, Any>? {
-        val transportType = params["type"] ?: vmessJson?.get("net")?.toString() ?: return null
-        if (transportType == "tcp" || transportType.isEmpty()) return null
+        val transportTypeRaw = getParam(params, "type") ?: vmessJson?.get("net")?.toString() ?: return null
+        val transportType = when (transportTypeRaw.lowercase()) {
+            "websocket" -> "ws"
+            else -> transportTypeRaw.lowercase()
+        }
 
         return when (transportType) {
+            "tcp" -> {
+                val headerType = (getParam(params, "headerType")
+                    ?: getParam(params, "header-type")
+                    ?: vmessJson?.get("type")?.toString()
+                    ?: "none").lowercase()
+                if (headerType != "http") return null
+                val transport = mutableMapOf<String, Any>("type" to "http")
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
+                path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
+                host?.takeIf { it.isNotEmpty() }?.let {
+                    transport["host"] = it.split(",").map { h -> h.trim() }.filter { h -> h.isNotEmpty() }
+                }
+                transport
+            }
             "ws", "websocket" -> {
                 val transport = mutableMapOf<String, Any>("type" to "ws")
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 host?.takeIf { it.isNotEmpty() }?.let {
                     transport["headers"] = mapOf("Host" to it)
                 }
-                params["max-early-data"]?.toIntOrNull()?.let { transport["max_early_data"] = it }
-                params["early-data-header-name"]?.takeIf { it.isNotEmpty() }?.let {
+                getParam(params, "max-early-data")?.toIntOrNull()?.let { transport["max_early_data"] = it }
+                getParam(params, "early-data-header-name")?.let {
                     transport["early_data_header_name"] = it
                 }
                 transport
             }
             "grpc" -> {
                 val transport = mutableMapOf<String, Any>("type" to "grpc")
-                val sn = params["serviceName"] ?: params["service-name"]
+                val sn = getParam(params, "serviceName") ?: getParam(params, "service-name")
                     ?: vmessJson?.get("path")?.toString()
                 sn?.takeIf { it.isNotEmpty() }?.let { transport["service_name"] = it }
                 transport
             }
             "http", "h2" -> {
                 val transport = mutableMapOf<String, Any>("type" to "http")
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 host?.takeIf { it.isNotEmpty() }?.let {
                     transport["host"] = it.split(",").map { h -> h.trim() }
                 }
@@ -200,9 +242,9 @@ object SingboxConfigParser {
             }
             "httpupgrade", "xhttp" -> {
                 val transport = mutableMapOf<String, Any>("type" to "httpupgrade")
-                val path = params["path"] ?: vmessJson?.get("path")?.toString()
+                val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
                 path?.takeIf { it.isNotEmpty() }?.let { transport["path"] = it }
-                val host = params["host"] ?: vmessJson?.get("host")?.toString()
+                val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 host?.takeIf { it.isNotEmpty() }?.let { transport["host"] = it }
                 transport
             }
@@ -230,7 +272,7 @@ object SingboxConfigParser {
         params["packet_encoding"]?.takeIf { it.isNotEmpty() }?.let { outbound["packet_encoding"] = it }
 
         buildTransport(params)?.let { outbound["transport"] = it }
-        buildTls(params)?.let { outbound["tls"] = it }
+        buildTls(params, defaultServerName = server)?.let { outbound["tls"] = it }
         buildMux(params)?.let { outbound["multiplex"] = it }
 
         return outbound
@@ -263,7 +305,8 @@ object SingboxConfigParser {
             "security" to security
         )
 
-        val transportParams = mapOf("type" to (json["net"]?.toString() ?: "tcp"))
+        val transportParams = mutableMapOf("type" to (json["net"]?.toString() ?: "tcp"))
+        json["type"]?.toString()?.let { transportParams["headerType"] = it }
         buildTransport(transportParams, json)?.let { outbound["transport"] = it }
 
         val tlsParams = mutableMapOf<String, String>()
@@ -271,7 +314,7 @@ object SingboxConfigParser {
         json["sni"]?.toString()?.let { tlsParams["sni"] = it }
         json["alpn"]?.toString()?.let { tlsParams["alpn"] = it }
         json["fp"]?.toString()?.let { tlsParams["fp"] = it }
-        buildTls(tlsParams, json)?.let { outbound["tls"] = it }
+        buildTls(tlsParams, json, defaultServerName = server)?.let { outbound["tls"] = it }
 
         return outbound
     }
@@ -293,7 +336,7 @@ object SingboxConfigParser {
             "security" to "auto"
         )
 
-        buildTls(params)?.let { outbound["tls"] = it }
+        buildTls(params, defaultServerName = server)?.let { outbound["tls"] = it }
         buildTransport(params)?.let { outbound["transport"] = it }
 
         return outbound
@@ -315,12 +358,12 @@ object SingboxConfigParser {
         )
 
         val tlsParams = params.toMutableMap()
-        if (!tlsParams.containsKey("security")) {
+        if (tlsParams["security"].isNullOrBlank()) {
             tlsParams["security"] = "tls"
         }
 
         buildTransport(params)?.let { outbound["transport"] = it }
-        buildTls(tlsParams)?.let { outbound["tls"] = it }
+        buildTls(tlsParams, defaultServerName = server)?.let { outbound["tls"] = it }
             ?: run { outbound["tls"] = mapOf("enabled" to true) }
         buildMux(params)?.let { outbound["multiplex"] = it }
 
@@ -423,9 +466,9 @@ object SingboxConfigParser {
         }
 
         val tls = mutableMapOf<String, Any>("enabled" to true)
-        params["sni"]?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
-        params["insecure"]?.let {
-            if (it == "1" || it == "true") tls["insecure"] = true
+        (getParam(params, "sni") ?: server.takeIf { isDomainLike(it) })?.let { tls["server_name"] = it }
+        parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+            if (it) tls["insecure"] = true
         }
         params["alpn"]?.takeIf { it.isNotEmpty() }?.let {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
@@ -464,10 +507,11 @@ object SingboxConfigParser {
         params["protocol"]?.takeIf { it.isNotEmpty() }?.let { outbound["protocol"] = it }
 
         val tls = mutableMapOf<String, Any>("enabled" to true)
-        params["peer"]?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
-        params["sni"]?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
-        params["insecure"]?.let {
-            if (it == "1" || it == "true") tls["insecure"] = true
+        (getParam(params, "sni")
+            ?: getParam(params, "peer")
+            ?: server.takeIf { isDomainLike(it) })?.let { tls["server_name"] = it }
+        parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+            if (it) tls["insecure"] = true
         }
         params["alpn"]?.takeIf { it.isNotEmpty() }?.let {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
@@ -505,12 +549,12 @@ object SingboxConfigParser {
         }
 
         val tls = mutableMapOf<String, Any>("enabled" to true)
-        params["sni"]?.takeIf { it.isNotEmpty() }?.let { tls["server_name"] = it }
+        (getParam(params, "sni") ?: server.takeIf { isDomainLike(it) })?.let { tls["server_name"] = it }
         params["alpn"]?.takeIf { it.isNotEmpty() }?.let {
             tls["alpn"] = it.split(",").map { a -> a.trim() }
         }
-        params["allowInsecure"]?.let {
-            if (it == "1" || it == "true") tls["insecure"] = true
+        parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {
+            if (it) tls["insecure"] = true
         }
         outbound["tls"] = tls
 
