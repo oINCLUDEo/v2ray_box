@@ -1,4 +1,4 @@
-## Unreleased
+## 1.0.1 - 2026-02-22
 
 * Android: improved Xray/Sing-box config normalization for V2Ray links with empty or legacy query fields.
 * Android: fixed VLESS/VMess/Trojan handling for `tcp + headerType=http`, TLS/Reality defaults, and SNI fallback behavior.
