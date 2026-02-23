@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -19,10 +21,12 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   VpnStatus _status = VpnStatus.stopped;
   VpnStats _stats = const VpnStats();
   VpnMode _mode = VpnMode.vpn;
+  String _coreEngine = 'xray';
   TotalTraffic _totalTraffic = const TotalTraffic();
 
   List<VpnConfig> _configs = [];
@@ -30,7 +34,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   StreamSubscription<VpnStatus>? _statusSub;
   StreamSubscription<VpnStats>? _statsSub;
+  StreamSubscription<Map<String, dynamic>>? _pingResultsSub;
   Timer? _trafficTimer;
+  int _pingRunId = 0;
+  bool _pingAllInProgress = false;
+  bool _proxyProbeInProgress = false;
+  Map<String, bool?> _proxyEndpointStatus = {};
 
   late AnimationController _pulseCtrl;
   late Animation<double> _pulseAnim;
@@ -38,29 +47,124 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pulseCtrl = AnimationController(
       duration: const Duration(seconds: 2),
       vsync: this,
     )..repeat(reverse: true);
-    _pulseAnim = Tween<double>(begin: 0.8, end: 1.0).animate(
-      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
-    );
+    _pulseAnim = Tween<double>(
+      begin: 0.8,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
     _load();
   }
 
   Future<void> _load() async {
     await _loadConfigs();
-    _mode = await widget.v2rayBox.getServiceMode();
+    await _refreshRuntimeState();
     _startWatching();
     if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshRuntimeState() async {
+    final mode = await widget.v2rayBox.getServiceMode();
+    final core = await widget.v2rayBox.getCoreEngine();
+    if (!mounted) return;
+    setState(() {
+      _mode = mode;
+      _coreEngine = core;
+    });
+  }
+
+  List<_LocalProxyEndpoint> _proxyEndpointsForCurrentCore() {
+    final core = _coreEngine.toLowerCase();
+    if (core == 'singbox') {
+      return const [
+        _LocalProxyEndpoint(
+          label: 'SOCKS5',
+          uri: 'socks5://127.0.0.1:10808',
+          note: 'sing-box mixed inbound',
+        ),
+        _LocalProxyEndpoint(
+          label: 'HTTP',
+          uri: 'http://127.0.0.1:10808',
+          note: 'sing-box mixed inbound',
+        ),
+      ];
+    }
+    return const [
+      _LocalProxyEndpoint(
+        label: 'SOCKS5',
+        uri: 'socks5://127.0.0.1:10808',
+        note: 'xray socks inbound',
+      ),
+      _LocalProxyEndpoint(
+        label: 'HTTP',
+        uri: 'http://127.0.0.1:10809',
+        note: 'xray http inbound',
+      ),
+    ];
+  }
+
+  Future<bool> _isLocalPortReady(int port) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        port,
+        timeout: const Duration(milliseconds: 800),
+      );
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  Future<void> _probeLocalProxyEndpoints() async {
+    if (_proxyProbeInProgress) return;
+    await _refreshRuntimeState();
+    final endpoints = _proxyEndpointsForCurrentCore();
+
+    setState(() {
+      _proxyProbeInProgress = true;
+      _proxyEndpointStatus = {};
+    });
+
+    try {
+      final result = <String, bool?>{};
+      for (final endpoint in endpoints) {
+        final uri = Uri.parse(endpoint.uri);
+        result[endpoint.uri] = await _isLocalPortReady(uri.port);
+      }
+      if (!mounted) return;
+      setState(() => _proxyEndpointStatus = result);
+    } finally {
+      if (mounted) {
+        setState(() => _proxyProbeInProgress = false);
+      }
+    }
+  }
+
+  Future<void> _copyProxyEndpoint(String uri) async {
+    await Clipboard.setData(ClipboardData(text: uri));
+    _snack('$uri copied');
   }
 
   Future<void> _loadConfigs() async {
     final prefs = await SharedPreferences.getInstance();
     final json = prefs.getString('vpn_configs');
+    var hadTransientPing = false;
     if (json != null) {
       final List<dynamic> list = jsonDecode(json);
       _configs = list.map((e) => VpnConfig.fromJson(e)).toList();
+      for (final c in _configs) {
+        if (c.ping == -2) {
+          c.ping = -1;
+          hadTransientPing = true;
+        }
+      }
       for (var c in _configs) {
         if (c.isSelected) {
           _selectedConfig = c;
@@ -68,22 +172,80 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         }
       }
     }
+    if (hadTransientPing) {
+      await _saveConfigs();
+    }
   }
 
   Future<void> _saveConfigs() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('vpn_configs', jsonEncode(_configs.map((e) => e.toJson()).toList()));
+    final persistable = _configs
+        .map((e) => e.copyWith(ping: e.ping == -2 ? -1 : e.ping))
+        .map((e) => e.toJson())
+        .toList();
+    await prefs.setString('vpn_configs', jsonEncode(persistable));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshRuntimeState());
+      if (_mode == VpnMode.proxy && _status == VpnStatus.started) {
+        unawaited(_probeLocalProxyEndpoints());
+      }
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_cancelPingOperations(resetLoading: true, persist: true));
+    }
+  }
+
+  Future<void> _cancelPingOperations({
+    bool resetLoading = true,
+    bool persist = false,
+  }) async {
+    _pingRunId++;
+    _pingAllInProgress = false;
+    await _pingResultsSub?.cancel();
+    _pingResultsSub = null;
+
+    if (!resetLoading) return;
+    var changed = false;
+    for (final c in _configs) {
+      if (c.ping == -2) {
+        c.ping = -1;
+        changed = true;
+      }
+    }
+    if (changed && mounted) {
+      setState(() {});
+    }
+    if (changed && persist) {
+      await _saveConfigs();
+    }
   }
 
   void _startWatching() {
     _statusSub = widget.v2rayBox.watchStatus().listen((s) {
-      if (mounted) setState(() => _status = s);
+      if (!mounted) return;
+      setState(() => _status = s);
+      if (_mode == VpnMode.proxy && s == VpnStatus.started) {
+        unawaited(_probeLocalProxyEndpoints());
+      } else if (s != VpnStatus.started && _proxyEndpointStatus.isNotEmpty) {
+        setState(() => _proxyEndpointStatus = {});
+      }
     });
     _statsSub = widget.v2rayBox.watchStats().listen((s) {
       if (mounted) setState(() => _stats = s);
     });
     _loadTraffic();
-    _trafficTimer = Timer.periodic(const Duration(seconds: 10), (_) => _loadTraffic());
+    _trafficTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _loadTraffic(),
+    );
   }
 
   Future<void> _loadTraffic() async {
@@ -93,6 +255,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_cancelPingOperations(resetLoading: true, persist: false));
     _statusSub?.cancel();
     _statsSub?.cancel();
     _trafficTimer?.cancel();
@@ -170,7 +334,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
             child: const Text('Add'),
@@ -200,23 +367,37 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _pingConfig(VpnConfig config) async {
+    await _cancelPingOperations(resetLoading: false, persist: false);
     final i = _configs.indexOf(config);
     if (i < 0) return;
+    final runId = ++_pingRunId;
     setState(() => _configs[i].ping = -2);
-    final latency = await widget.v2rayBox.ping(config.link);
-    setState(() => _configs[i].ping = latency);
-    await _saveConfigs();
+    try {
+      final latency = await widget.v2rayBox.ping(config.link);
+      if (!mounted || runId != _pingRunId) return;
+      setState(() => _configs[i].ping = latency);
+    } finally {
+      if (mounted && runId == _pingRunId) {
+        await _saveConfigs();
+      }
+    }
   }
 
   Future<void> _pingAll() async {
     if (_configs.isEmpty) return;
+    if (_pingAllInProgress) return;
+    await _cancelPingOperations(resetLoading: false, persist: false);
+    final runId = ++_pingRunId;
+    _pingAllInProgress = true;
+
     setState(() {
       for (var c in _configs) {
         c.ping = -2;
       }
     });
 
-    final sub = widget.v2rayBox.watchPingResults().listen((r) {
+    _pingResultsSub = widget.v2rayBox.watchPingResults().listen((r) {
+      if (runId != _pingRunId) return;
       final link = r['link'] as String?;
       final latency = (r['latency'] as num?)?.toInt() ?? -1;
       if (link != null && mounted) {
@@ -230,9 +411,23 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     try {
       await widget.v2rayBox.pingAll(_configs.map((c) => c.link).toList());
     } finally {
-      await sub.cancel();
+      await _pingResultsSub?.cancel();
+      _pingResultsSub = null;
+      if (runId == _pingRunId) {
+        _pingAllInProgress = false;
+        var changed = false;
+        for (final c in _configs) {
+          if (c.ping == -2) {
+            c.ping = -1;
+            changed = true;
+          }
+        }
+        if (changed && mounted) {
+          setState(() {});
+        }
+        await _saveConfigs();
+      }
     }
-    await _saveConfigs();
   }
 
   void _selectConfig(VpnConfig config) {
@@ -256,6 +451,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Future<void> _toggleConnection() async {
     if (_status == VpnStatus.starting || _status == VpnStatus.stopping) return;
+    await _refreshRuntimeState();
 
     if (_status == VpnStatus.started) {
       await widget.v2rayBox.disconnect();
@@ -280,7 +476,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           _snack('Config error: $err');
           return;
         }
-        await widget.v2rayBox.connect(_selectedConfig!.link, name: _selectedConfig!.name);
+        await widget.v2rayBox.connect(
+          _selectedConfig!.link,
+          name: _selectedConfig!.name,
+        );
       } catch (e) {
         _snack('Connection failed: $e');
       }
@@ -320,13 +519,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               version: QrVersions.auto,
               size: 260,
               backgroundColor: Colors.white,
-              eyeStyle: const QrEyeStyle(color: Colors.black, eyeShape: QrEyeShape.square),
-              dataModuleStyle: const QrDataModuleStyle(color: Colors.black, dataModuleShape: QrDataModuleShape.square),
+              eyeStyle: const QrEyeStyle(
+                color: Colors.black,
+                eyeShape: QrEyeShape.square,
+              ),
+              dataModuleStyle: const QrDataModuleStyle(
+                color: Colors.black,
+                dataModuleShape: QrDataModuleShape.square,
+              ),
             ),
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
         ],
       ),
     );
@@ -363,6 +571,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               child: Column(
                 children: [
                   _buildConnectionCard(),
+                  if (_mode == VpnMode.proxy) _buildProxyModeCard(),
                   _buildStatsRow(),
                   _buildTotalTrafficCard(),
                   _buildConfigSection(),
@@ -385,9 +594,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('V2Ray Box',
+              Text(
+                'V2Ray Box',
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  fontWeight: FontWeight.bold, color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
                 ),
               ),
               Text(
@@ -398,7 +609,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
           Row(
             children: [
-              IconButton(icon: const Icon(Icons.refresh), onPressed: _pingAll, tooltip: 'Ping All'),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                onPressed: _pingAll,
+                tooltip: 'Ping All',
+              ),
               PopupMenuButton<String>(
                 icon: const Icon(Icons.add),
                 tooltip: 'Add Config',
@@ -413,9 +628,27 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   }
                 },
                 itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'clipboard', child: ListTile(leading: Icon(Icons.content_paste), title: Text('From Clipboard'))),
-                  const PopupMenuItem(value: 'qr', child: ListTile(leading: Icon(Icons.qr_code_scanner), title: Text('Scan QR Code'))),
-                  const PopupMenuItem(value: 'text', child: ListTile(leading: Icon(Icons.edit), title: Text('Enter Manually'))),
+                  const PopupMenuItem(
+                    value: 'clipboard',
+                    child: ListTile(
+                      leading: Icon(Icons.content_paste),
+                      title: Text('From Clipboard'),
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'qr',
+                    child: ListTile(
+                      leading: Icon(Icons.qr_code_scanner),
+                      title: Text('Scan QR Code'),
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'text',
+                    child: ListTile(
+                      leading: Icon(Icons.edit),
+                      title: Text('Enter Manually'),
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -427,7 +660,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Widget _buildConnectionCard() {
     final isConnected = _status == VpnStatus.started;
-    final isTransitioning = _status == VpnStatus.starting || _status == VpnStatus.stopping;
+    final isTransitioning =
+        _status == VpnStatus.starting || _status == VpnStatus.stopping;
 
     String statusText = 'Disconnected';
     Color statusColor = Colors.grey;
@@ -484,7 +718,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                                 height: 32,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 3,
-                                  valueColor: AlwaysStoppedAnimation(statusColor),
+                                  valueColor: AlwaysStoppedAnimation(
+                                    statusColor,
+                                  ),
                                 ),
                               )
                             : Icon(statusIcon, color: statusColor, size: 32),
@@ -497,13 +733,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(statusText,
-                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: statusColor),
+                      Text(
+                        statusText,
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: statusColor,
+                        ),
                       ),
                       if (_selectedConfig != null) ...[
                         const SizedBox(height: 4),
-                        Text(_selectedConfig!.name,
-                          style: TextStyle(color: Colors.grey[400], fontSize: 14),
+                        Text(
+                          _selectedConfig!.name,
+                          style: TextStyle(
+                            color: Colors.grey[400],
+                            fontSize: 14,
+                          ),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ],
@@ -511,7 +756,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   ),
                 ),
                 Icon(
-                  isConnected ? Icons.stop_circle_outlined : Icons.play_circle_outline,
+                  isConnected
+                      ? Icons.stop_circle_outlined
+                      : Icons.play_circle_outline,
                   color: statusColor,
                   size: 40,
                 ),
@@ -523,14 +770,235 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
+  Color _proxyStatusColor(bool? ready, bool connected) {
+    if (!connected) return Colors.grey;
+    if (ready == null) return const Color(0xFFFFA502);
+    return ready ? const Color(0xFF2ED573) : const Color(0xFFFF4757);
+  }
+
+  String _proxyStatusText(bool? ready, bool connected) {
+    if (!connected) return 'Connect first';
+    if (ready == null) return 'Not tested';
+    return ready ? 'Ready' : 'Not listening';
+  }
+
+  Widget _buildProxyModeCard() {
+    final endpoints = _proxyEndpointsForCurrentCore();
+    final connected = _status == VpnStatus.started;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFA502).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.settings_ethernet,
+                      color: Color(0xFFFFA502),
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Proxy Mode Endpoints',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Core: ${_coreEngine == 'singbox' ? 'sing-box' : 'xray'}',
+                          style: TextStyle(
+                            color: Colors.grey[400],
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'In Proxy mode, Android apps do not route traffic automatically. '
+                'Set proxy manually in app/system settings using these local endpoints.',
+                style: TextStyle(
+                  color: Colors.grey[350],
+                  fontSize: 12,
+                  height: 1.3,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...endpoints.map((endpoint) {
+                final ready = _proxyEndpointStatus[endpoint.uri];
+                final statusColor = _proxyStatusColor(ready, connected);
+                final statusText = _proxyStatusText(ready, connected);
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.16),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text(
+                                  endpoint.label,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    endpoint.note,
+                                    style: TextStyle(
+                                      color: Colors.grey[500],
+                                      fontSize: 11,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              endpoint.uri,
+                              style: TextStyle(
+                                color: Colors.grey[300],
+                                fontSize: 12,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: statusColor,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                statusText,
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy_rounded, size: 18),
+                            tooltip: 'Copy endpoint',
+                            onPressed: () => _copyProxyEndpoint(endpoint.uri),
+                            color: const Color(0xFF00D9FF),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: connected && !_proxyProbeInProgress
+                        ? _probeLocalProxyEndpoints
+                        : null,
+                    icon: _proxyProbeInProgress
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.wifi_find, size: 16),
+                    label: Text(
+                      _proxyProbeInProgress ? 'Testing...' : 'Test Local Proxy',
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _refreshRuntimeState,
+                    icon: const Icon(Icons.sync, size: 16),
+                    label: const Text('Refresh'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildStatsRow() {
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Row(
         children: [
-          Expanded(child: _StatTile(icon: Icons.arrow_upward, label: 'Upload', value: _stats.formattedUplink, total: _stats.formattedUplinkTotal, color: const Color(0xFF6C5CE7))),
+          Expanded(
+            child: _StatTile(
+              icon: Icons.arrow_upward,
+              label: 'Upload',
+              value: _stats.formattedUplink,
+              total: _stats.formattedUplinkTotal,
+              color: const Color(0xFF6C5CE7),
+            ),
+          ),
           const SizedBox(width: 12),
-          Expanded(child: _StatTile(icon: Icons.arrow_downward, label: 'Download', value: _stats.formattedDownlink, total: _stats.formattedDownlinkTotal, color: const Color(0xFF00D9FF))),
+          Expanded(
+            child: _StatTile(
+              icon: Icons.arrow_downward,
+              label: 'Download',
+              value: _stats.formattedDownlink,
+              total: _stats.formattedDownlinkTotal,
+              color: const Color(0xFF00D9FF),
+            ),
+          ),
         ],
       ),
     );
@@ -550,17 +1018,29 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   color: const Color(0xFF2ED573).withOpacity(0.2),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.data_usage, color: Color(0xFF2ED573), size: 24),
+                child: const Icon(
+                  Icons.data_usage,
+                  color: Color(0xFF2ED573),
+                  size: 24,
+                ),
               ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Total Traffic', style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+                    Text(
+                      'Total Traffic',
+                      style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                    ),
                     const SizedBox(height: 4),
-                    Text(_totalTraffic.formattedTotal,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2ED573)),
+                    Text(
+                      _totalTraffic.formattedTotal,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF2ED573),
+                      ),
                     ),
                   ],
                 ),
@@ -568,17 +1048,37 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.arrow_upward, size: 12, color: Color(0xFF6C5CE7)),
-                    const SizedBox(width: 4),
-                    Text(_totalTraffic.formattedUpload, style: TextStyle(color: Colors.grey[400], fontSize: 11)),
-                  ]),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.arrow_upward,
+                        size: 12,
+                        color: Color(0xFF6C5CE7),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _totalTraffic.formattedUpload,
+                        style: TextStyle(color: Colors.grey[400], fontSize: 11),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 2),
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.arrow_downward, size: 12, color: Color(0xFF00D9FF)),
-                    const SizedBox(width: 4),
-                    Text(_totalTraffic.formattedDownload, style: TextStyle(color: Colors.grey[400], fontSize: 11)),
-                  ]),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.arrow_downward,
+                        size: 12,
+                        color: Color(0xFF00D9FF),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _totalTraffic.formattedDownload,
+                        style: TextStyle(color: Colors.grey[400], fontSize: 11),
+                      ),
+                    ],
+                  ),
                 ],
               ),
               const SizedBox(width: 8),
@@ -608,8 +1108,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Configs', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-              Text('${_configs.length} items', style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+              Text(
+                'Configs',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              Text(
+                '${_configs.length} items',
+                style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -621,9 +1129,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   children: [
                     Icon(Icons.cloud_off, size: 64, color: Colors.grey[600]),
                     const SizedBox(height: 16),
-                    Text('No configs added', style: TextStyle(color: Colors.grey[400], fontSize: 16)),
+                    Text(
+                      'No configs added',
+                      style: TextStyle(color: Colors.grey[400], fontSize: 16),
+                    ),
                     const SizedBox(height: 8),
-                    TextButton.icon(onPressed: _addFromClipboard, icon: const Icon(Icons.add), label: const Text('Add from clipboard')),
+                    TextButton.icon(
+                      onPressed: _addFromClipboard,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add from clipboard'),
+                    ),
                   ],
                 ),
               ),
@@ -648,12 +1163,30 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 }
 
+class _LocalProxyEndpoint {
+  final String label;
+  final String uri;
+  final String note;
+
+  const _LocalProxyEndpoint({
+    required this.label,
+    required this.uri,
+    required this.note,
+  });
+}
+
 class _StatTile extends StatelessWidget {
   final IconData icon;
   final String label, value, total;
   final Color color;
 
-  const _StatTile({required this.icon, required this.label, required this.value, required this.total, required this.color});
+  const _StatTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.total,
+    required this.color,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -663,14 +1196,29 @@ class _StatTile extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(icon, color: color, size: 18),
-              const SizedBox(width: 8),
-              Text(label, style: TextStyle(color: Colors.grey[400], fontSize: 12)),
-            ]),
+            Row(
+              children: [
+                Icon(icon, color: color, size: 18),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                ),
+              ],
+            ),
             const SizedBox(height: 8),
-            Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
-            Text('Total: $total', style: TextStyle(color: Colors.grey[500], fontSize: 11)),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            ),
+            Text(
+              'Total: $total',
+              style: TextStyle(color: Colors.grey[500], fontSize: 11),
+            ),
           ],
         ),
       ),
@@ -680,12 +1228,23 @@ class _StatTile extends StatelessWidget {
 
 class _ConfigTile extends StatelessWidget {
   final VpnConfig config;
-  final VoidCallback onTap, onPing, onDelete, onViewJson, onShowQr, onShare, onCopyLink;
+  final VoidCallback onTap,
+      onPing,
+      onDelete,
+      onViewJson,
+      onShowQr,
+      onShare,
+      onCopyLink;
 
   const _ConfigTile({
-    required this.config, required this.onTap, required this.onPing,
-    required this.onDelete, required this.onViewJson, required this.onShowQr,
-    required this.onShare, required this.onCopyLink,
+    required this.config,
+    required this.onTap,
+    required this.onPing,
+    required this.onDelete,
+    required this.onViewJson,
+    required this.onShowQr,
+    required this.onShare,
+    required this.onCopyLink,
   });
 
   @override
@@ -700,12 +1259,15 @@ class _ConfigTile extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
-            border: config.isSelected ? Border.all(color: const Color(0xFF6C5CE7), width: 2) : null,
+            border: config.isSelected
+                ? Border.all(color: const Color(0xFF6C5CE7), width: 2)
+                : null,
           ),
           child: Row(
             children: [
               Container(
-                width: 48, height: 48,
+                width: 48,
+                height: 48,
                 decoration: BoxDecoration(
                   color: _protocolColor(config.protocol).withOpacity(0.2),
                   borderRadius: BorderRadius.circular(12),
@@ -713,7 +1275,11 @@ class _ConfigTile extends StatelessWidget {
                 child: Center(
                   child: Text(
                     config.protocol.substring(0, 1).toUpperCase(),
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: _protocolColor(config.protocol)),
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: _protocolColor(config.protocol),
+                    ),
                   ),
                 ),
               ),
@@ -722,43 +1288,118 @@ class _ConfigTile extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(config.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15), overflow: TextOverflow.ellipsis),
+                    Text(
+                      config.name,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     const SizedBox(height: 4),
-                    Text(config.protocolDisplayName, style: TextStyle(color: Colors.grey[400], fontSize: 12)),
+                    Text(
+                      config.protocolDisplayName,
+                      style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                    ),
                   ],
                 ),
               ),
               if (isPinging)
-                const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               else
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: _pingColor(config.ping).withOpacity(0.2),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text(config.pingDisplay, style: TextStyle(color: _pingColor(config.ping), fontSize: 12, fontWeight: FontWeight.w600)),
+                  child: Text(
+                    config.pingDisplay,
+                    style: TextStyle(
+                      color: _pingColor(config.ping),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               const SizedBox(width: 4),
               PopupMenuButton<String>(
                 icon: Icon(Icons.more_vert, color: Colors.grey[400]),
                 onSelected: (v) {
                   switch (v) {
-                    case 'ping': onPing();
-                    case 'json': onViewJson();
-                    case 'qr': onShowQr();
-                    case 'share': onShare();
-                    case 'copy': onCopyLink();
-                    case 'delete': onDelete();
+                    case 'ping':
+                      onPing();
+                    case 'json':
+                      onViewJson();
+                    case 'qr':
+                      onShowQr();
+                    case 'share':
+                      onShare();
+                    case 'copy':
+                      onCopyLink();
+                    case 'delete':
+                      onDelete();
                   }
                 },
                 itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'ping', child: ListTile(leading: Icon(Icons.speed), title: Text('Ping'), dense: true)),
-                  const PopupMenuItem(value: 'json', child: ListTile(leading: Icon(Icons.code), title: Text('View / Edit JSON'), dense: true)),
-                  const PopupMenuItem(value: 'qr', child: ListTile(leading: Icon(Icons.qr_code), title: Text('Show QR Code'), dense: true)),
-                  const PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share), title: Text('Share'), dense: true)),
-                  const PopupMenuItem(value: 'copy', child: ListTile(leading: Icon(Icons.copy), title: Text('Copy Link'), dense: true)),
-                  const PopupMenuItem(value: 'delete', child: ListTile(leading: Icon(Icons.delete, color: Colors.red), title: Text('Delete', style: TextStyle(color: Colors.red)), dense: true)),
+                  const PopupMenuItem(
+                    value: 'ping',
+                    child: ListTile(
+                      leading: Icon(Icons.speed),
+                      title: Text('Ping'),
+                      dense: true,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'json',
+                    child: ListTile(
+                      leading: Icon(Icons.code),
+                      title: Text('View / Edit JSON'),
+                      dense: true,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'qr',
+                    child: ListTile(
+                      leading: Icon(Icons.qr_code),
+                      title: Text('Show QR Code'),
+                      dense: true,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'share',
+                    child: ListTile(
+                      leading: Icon(Icons.share),
+                      title: Text('Share'),
+                      dense: true,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'copy',
+                    child: ListTile(
+                      leading: Icon(Icons.copy),
+                      title: Text('Copy Link'),
+                      dense: true,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: ListTile(
+                      leading: Icon(Icons.delete, color: Colors.red),
+                      title: Text(
+                        'Delete',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                      dense: true,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -770,14 +1411,22 @@ class _ConfigTile extends StatelessWidget {
 
   Color _protocolColor(String p) {
     switch (p.toLowerCase()) {
-      case 'vmess': return const Color(0xFF6C5CE7);
-      case 'vless': return const Color(0xFF00D9FF);
-      case 'trojan': return const Color(0xFFFFA502);
-      case 'ss': return const Color(0xFF2ED573);
-      case 'hysteria2': return const Color(0xFFE84393);
-      case 'tuic': return const Color(0xFFFD79A8);
-      case 'wireguard': return const Color(0xFF00B894);
-      default: return Colors.grey;
+      case 'vmess':
+        return const Color(0xFF6C5CE7);
+      case 'vless':
+        return const Color(0xFF00D9FF);
+      case 'trojan':
+        return const Color(0xFFFFA502);
+      case 'ss':
+        return const Color(0xFF2ED573);
+      case 'hysteria2':
+        return const Color(0xFFE84393);
+      case 'tuic':
+        return const Color(0xFFFD79A8);
+      case 'wireguard':
+        return const Color(0xFF00B894);
+      default:
+        return Colors.grey;
     }
   }
 
@@ -809,7 +1458,10 @@ class _QrScannerPageState extends State<QrScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scan QR Code'), backgroundColor: Colors.transparent),
+      appBar: AppBar(
+        title: const Text('Scan QR Code'),
+        backgroundColor: Colors.transparent,
+      ),
       body: MobileScanner(
         controller: _controller,
         onDetect: (capture) {

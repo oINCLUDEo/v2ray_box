@@ -2,16 +2,20 @@ package com.example.v2ray_box
 
 import android.Manifest
 import android.app.Activity
+import android.app.Application
+import android.content.ComponentCallbacks2
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.os.PowerManager
 import android.util.Base64
 import android.util.Log
@@ -54,6 +58,10 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.ServerSocket
 import java.util.LinkedList
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.atomic.AtomicLong
 
 class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     PluginRegistry.ActivityResultListener, ServiceConnection.Callback, CommandClient.Handler {
@@ -81,6 +89,39 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     private var statsCommandClient: CommandClient? = null
     private var logsCommandClient: CommandClient? = null
+    private val pingSessionId = AtomicLong(0L)
+    private val pingExecutors = Collections.newSetFromMap(ConcurrentHashMap<ExecutorService, Boolean>())
+    private var componentCallbacksRegistered = false
+    private var activityCallbacksRegistered = false
+    private var startedActivityCount = 0
+    private val appComponentCallbacks = object : ComponentCallbacks2 {
+        override fun onConfigurationChanged(newConfig: Configuration) = Unit
+        override fun onLowMemory() = Unit
+
+        override fun onTrimMemory(level: Int) {
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+                cancelActivePing("app moved to background")
+            }
+        }
+    }
+    private val appActivityCallbacks = object : Application.ActivityLifecycleCallbacks {
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+        override fun onActivityResumed(activity: Activity) = Unit
+        override fun onActivityPaused(activity: Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+        override fun onActivityDestroyed(activity: Activity) = Unit
+
+        override fun onActivityStarted(activity: Activity) {
+            startedActivityCount++
+        }
+
+        override fun onActivityStopped(activity: Activity) {
+            startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+            if (startedActivityCount == 0) {
+                cancelActivePing("all activities stopped")
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "V2rayBoxPlugin"
@@ -119,6 +160,16 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         packageManager = applicationContext?.packageManager
         powerManager = applicationContext?.getSystemService()
         notificationManager = applicationContext?.getSystemService()
+        if (!componentCallbacksRegistered) {
+            applicationContext?.registerComponentCallbacks(appComponentCallbacks)
+            componentCallbacksRegistered = true
+        }
+        val app = applicationContext as? Application
+        if (!activityCallbacksRegistered && app != null) {
+            app.registerActivityLifecycleCallbacks(appActivityCallbacks)
+            activityCallbacksRegistered = true
+            startedActivityCount = 0
+        }
 
         Settings.init(flutterPluginBinding.applicationContext)
 
@@ -187,6 +238,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
             override fun onCancel(arguments: Any?) {
                 pingEventSink = null
+                cancelActivePing("ping stream cancelled")
             }
         })
 
@@ -247,13 +299,25 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        cancelActivePing("engine detached")
         methodChannel.setMethodCallHandler(null)
         statusChannel.setStreamHandler(null)
         alertsChannel.setStreamHandler(null)
         statsChannel.setStreamHandler(null)
+        pingChannel.setStreamHandler(null)
         logsChannel.setStreamHandler(null)
         statsCommandClient?.disconnect()
         logsCommandClient?.disconnect()
+        if (componentCallbacksRegistered) {
+            applicationContext?.unregisterComponentCallbacks(appComponentCallbacks)
+            componentCallbacksRegistered = false
+        }
+        val app = applicationContext as? Application
+        if (activityCallbacksRegistered && app != null) {
+            app.unregisterActivityLifecycleCallbacks(appActivityCallbacks)
+            activityCallbacksRegistered = false
+            startedActivityCount = 0
+        }
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
@@ -273,6 +337,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onDetachedFromActivity() {
+        cancelActivePing("activity detached")
         connection?.disconnect()
         connection = null
         activity = null
@@ -411,11 +476,10 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         Settings.activeConfigPath = configPath
                         Settings.activeProfileName = args["name"] as String? ?: ""
 
-                        val started = serviceStatus.value == Status.Started
-                        if (started) {
-                            Log.w(TAG, "service is already running")
-                            success(true)
-                            return@runCatching
+                        if (isServiceActive()) {
+                            Log.w(TAG, "start requested while service is active, restarting service")
+                            BoxService.stop(context)
+                            waitForServiceStopped()
                         }
                         startService()
                         success(true)
@@ -459,6 +523,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "stop" -> {
                 scope.launch {
                     result.runCatching {
+                        cancelActivePing("vpn stop requested")
                         val started = serviceStatus.value == Status.Started
                         if (!started) {
                             Log.w(TAG, "service is not running")
@@ -495,7 +560,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             connection?.reconnect()
                         }
                         BoxService.stop(context)
-                        delay(1000L)
+                        waitForServiceStopped()
                         startService()
                         success(true)
                     }
@@ -598,9 +663,10 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val args = call.arguments as Map<*, *>
                         val link = args["link"] as String
                         val timeout = parsePingTimeout(args["timeout"])
+                        val sessionId = beginPingSession()
 
                         try {
-                            val delay = testConfigLink(link, timeout)
+                            val delay = testConfigLink(link, timeout, sessionId)
                             success(delay)
                         } catch (e: Exception) {
                             Log.e(TAG, "URL test failed: ${e.message}")
@@ -617,8 +683,9 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         @Suppress("UNCHECKED_CAST")
                         val links = args["links"] as List<String>
                         val timeout = parsePingTimeout(args["timeout"])
+                        val sessionId = beginPingSession()
 
-                        val results = testConfigLinksParallel(links, timeout)
+                        val results = testConfigLinksParallel(links, timeout, sessionId)
                         success(results)
                     }
                 }
@@ -689,9 +756,37 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
 
             "set_core_engine" -> {
-                val engine = call.arguments as String
-                Settings.coreEngine = engine
-                result.success(true)
+                scope.launch(Dispatchers.IO) {
+                    result.runCatching {
+                        val context = applicationContext ?: run {
+                            error("no_context", "Application context not available", null)
+                            return@runCatching
+                        }
+                        val engine = (call.arguments as String).trim().lowercase()
+                        if (engine != CoreEngine.XRAY && engine != CoreEngine.SINGBOX) {
+                            error("invalid_engine", "Engine must be 'xray' or 'singbox'", null)
+                            return@runCatching
+                        }
+                        if (Settings.coreEngine == engine) {
+                            success(true)
+                            return@runCatching
+                        }
+
+                        cancelActivePing("core switch requested")
+                        if (isServiceActive()) {
+                            Log.d(TAG, "Stopping service before switching core to $engine")
+                            BoxService.stop(context)
+                            waitForServiceStopped()
+                        }
+                        if (SingboxProcess.isRunning || SingboxProcess.isProcessAlive) {
+                            Log.d(TAG, "Stopping stale sing-box process before core switch")
+                            SingboxProcess.stop()
+                        }
+                        CommandClient.activeCoreController = null
+                        Settings.coreEngine = engine
+                        success(true)
+                    }
+                }
             }
 
             "get_core_engine" -> {
@@ -734,10 +829,10 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         Settings.activeConfigPath = configPath
                         Settings.activeProfileName = name
 
-                        val started = serviceStatus.value == Status.Started
-                        if (started) {
-                            success(true)
-                            return@runCatching
+                        if (isServiceActive()) {
+                            Log.w(TAG, "start_with_json requested while service is active, restarting service")
+                            BoxService.stop(context)
+                            waitForServiceStopped()
                         }
                         startService()
                         success(true)
@@ -954,14 +1049,70 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         @SerializedName("is-system-app") val isSystemApp: Boolean
     )
 
-    private fun testConfigLink(link: String, timeout: Int): Long {
+    private fun isServiceActive(): Boolean {
+        val current = serviceStatus.value
+        return current == Status.Started || current == Status.Starting || current == Status.Stopping
+    }
+
+    private suspend fun waitForServiceStopped(timeoutMs: Long = 6000L): Boolean {
+        val startedAt = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            if (serviceStatus.value == Status.Stopped) return true
+            delay(80L)
+        }
+        val stopped = serviceStatus.value == Status.Stopped
+        if (!stopped) {
+            Log.w(TAG, "Timed out waiting for service to stop. Current state=${serviceStatus.value}")
+        }
+        return stopped
+    }
+
+    private fun beginPingSession(): Long {
+        val sessionId = pingSessionId.incrementAndGet()
+        cancelPingExecutors("starting new ping session $sessionId")
+        return sessionId
+    }
+
+    private fun cancelActivePing(reason: String) {
+        pingSessionId.incrementAndGet()
+        cancelPingExecutors(reason)
+    }
+
+    private fun cancelPingExecutors(reason: String) {
+        if (pingExecutors.isEmpty()) return
+        Log.d(TAG, "Cancelling ping tasks: $reason")
+        val snapshot = pingExecutors.toList()
+        snapshot.forEach { executor ->
+            try {
+                executor.shutdownNow()
+            } catch (_: Exception) {
+            } finally {
+                pingExecutors.remove(executor)
+            }
+        }
+    }
+
+    private fun registerPingExecutor(executor: ExecutorService) {
+        pingExecutors.add(executor)
+    }
+
+    private fun unregisterPingExecutor(executor: ExecutorService) {
+        pingExecutors.remove(executor)
+    }
+
+    private fun isPingSessionActive(sessionId: Long): Boolean = pingSessionId.get() == sessionId
+
+    private fun testConfigLink(link: String, timeout: Int, sessionId: Long): Long {
+        if (!isPingSessionActive(sessionId)) return -1L
         val outbound = XrayConfigParser.parseLink(link) ?: run {
             Log.e(TAG, "Ping: failed to parse config link")
             return -1L
         }
+        if (!isPingSessionActive(sessionId)) return -1L
         ensureCoreEnvInitializedForPing()
         val config = buildPingMeasureConfig(outbound)
-        val measured = measureOutboundDelayWithTimeout(config, Settings.pingTestUrl, timeout)
+        val measured = measureOutboundDelayWithTimeout(config, Settings.pingTestUrl, timeout, sessionId)
+        if (!isPingSessionActive(sessionId)) return -1L
         val normalized = normalizeDelayValue(measured)
         if (normalized >= 0L) {
             Log.d(TAG, "Ping OK: ${normalized}ms")
@@ -971,7 +1122,11 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return normalized
     }
 
-    private fun testConfigLinksParallel(links: List<String>, timeout: Int): Map<String, Long> {
+    private fun testConfigLinksParallel(
+        links: List<String>,
+        timeout: Int,
+        sessionId: Long
+    ): Map<String, Long> {
         val results = java.util.concurrent.ConcurrentHashMap<String, Long>()
         val effectiveTimeout = timeout.coerceAtLeast(MIN_PING_TIMEOUT_MS)
 
@@ -980,24 +1135,34 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         val parsed = mutableListOf<ParsedEntry>()
         val mainHandler0 = android.os.Handler(android.os.Looper.getMainLooper())
         links.forEach { link ->
+            if (!isPingSessionActive(sessionId)) {
+                return@forEach
+            }
             val outbound = XrayConfigParser.parseLink(link)
             if (outbound != null) {
                 parsed.add(ParsedEntry(link, outbound))
             } else {
                 results[link] = -1L
-                mainHandler0.post {
-                    pingEventSink?.success(mapOf("link" to link, "latency" to -1L))
+                if (isPingSessionActive(sessionId)) {
+                    mainHandler0.post {
+                        if (isPingSessionActive(sessionId)) {
+                            pingEventSink?.success(mapOf("link" to link, "latency" to -1L))
+                        }
+                    }
                 }
             }
         }
 
+        if (!isPingSessionActive(sessionId)) return results
         if (parsed.isEmpty()) return results
 
         ensureCoreEnvInitializedForPing()
+        if (!isPingSessionActive(sessionId)) return results
 
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
         val threadCount = minOf(parsed.size, PING_MAX_PARALLEL_TASKS)
         val executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount)
+        registerPingExecutor(executor)
         val latch = java.util.concurrent.CountDownLatch(parsed.size)
         val batches = (parsed.size + threadCount - 1) / threadCount
         val waitTimeoutMs = (batches.toLong() * (effectiveTimeout.toLong() + PING_TASK_GRACE_MS)) + 4000L
@@ -1005,22 +1170,35 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         parsed.forEach { entry ->
             executor.submit {
                 try {
+                    if (!isPingSessionActive(sessionId)) {
+                        results.putIfAbsent(entry.link, -1L)
+                        return@submit
+                    }
                     val config = buildPingMeasureConfig(entry.outbound)
                     val measured = measureOutboundDelayWithTimeout(
                         config,
                         Settings.pingTestUrl,
-                        effectiveTimeout
+                        effectiveTimeout,
+                        sessionId
                     )
+                    if (!isPingSessionActive(sessionId)) {
+                        results.putIfAbsent(entry.link, -1L)
+                        return@submit
+                    }
                     val elapsed = normalizeDelayValue(measured)
                     results[entry.link] = elapsed
                     mainHandler.post {
-                        pingEventSink?.success(mapOf("link" to entry.link, "latency" to elapsed))
+                        if (isPingSessionActive(sessionId)) {
+                            pingEventSink?.success(mapOf("link" to entry.link, "latency" to elapsed))
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Ping failed for ${entry.link}: ${e.message}")
                     results[entry.link] = -1L
                     mainHandler.post {
-                        pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+                        if (isPingSessionActive(sessionId)) {
+                            pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+                        }
                     }
                 } finally {
                     latch.countDown()
@@ -1028,18 +1206,31 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
         }
 
-        val completed = latch.await(waitTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-        if (!completed) {
+        var remainingMs = waitTimeoutMs
+        while (latch.count > 0 && remainingMs > 0 && isPingSessionActive(sessionId)) {
+            val step = minOf(250L, remainingMs)
+            latch.await(step, java.util.concurrent.TimeUnit.MILLISECONDS)
+            remainingMs -= step
+        }
+        val completed = latch.count == 0L
+        if (!completed && isPingSessionActive(sessionId)) {
             Log.w(TAG, "Parallel ping timed out after ${waitTimeoutMs}ms")
+        } else if (!isPingSessionActive(sessionId)) {
+            Log.d(TAG, "Parallel ping cancelled")
         }
         executor.shutdownNow()
+        unregisterPingExecutor(executor)
 
         // Ensure caller always receives a result for each input link.
-        parsed.forEach { entry ->
-            if (!results.containsKey(entry.link)) {
-                results[entry.link] = -1L
-                mainHandler.post {
-                    pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+        if (isPingSessionActive(sessionId)) {
+            parsed.forEach { entry ->
+                if (!results.containsKey(entry.link)) {
+                    results[entry.link] = -1L
+                    mainHandler.post {
+                        if (isPingSessionActive(sessionId)) {
+                            pingEventSink?.success(mapOf("link" to entry.link, "latency" to -1L))
+                        }
+                    }
                 }
             }
         }
@@ -1061,8 +1252,15 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return timeout.coerceAtLeast(MIN_PING_TIMEOUT_MS)
     }
 
-    private fun measureOutboundDelayWithTimeout(configJson: String, testUrl: String, timeoutMs: Int): Long {
+    private fun measureOutboundDelayWithTimeout(
+        configJson: String,
+        testUrl: String,
+        timeoutMs: Int,
+        sessionId: Long
+    ): Long {
+        if (!isPingSessionActive(sessionId)) return -1L
         val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        registerPingExecutor(executor)
         val future = executor.submit<Long> {
             measureOutboundDelay(configJson, testUrl)
         }
@@ -1077,6 +1275,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         } finally {
             future.cancel(true)
             executor.shutdownNow()
+            unregisterPingExecutor(executor)
         }
     }
 
