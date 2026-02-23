@@ -305,6 +305,9 @@ class BoxService(
             Log.d(TAG, "Starting Xray core...")
             val controller = Libv2ray.newCoreController(this)
             controller.startLoop(content, tunFd)
+            if (!waitForCoreControllerReady(controller)) {
+                throw IllegalStateException("Xray core did not enter running state")
+            }
             coreController = controller
             CommandClient.activeCoreController = controller
             Log.d(TAG, "Xray core started successfully")
@@ -354,6 +357,9 @@ class BoxService(
                 val bridgeContent = bridgeConfigFile.readText()
                 val controller = Libv2ray.newCoreController(this)
                 controller.startLoop(bridgeContent, tunFd)
+                if (!waitForCoreControllerReady(controller)) {
+                    throw IllegalStateException("Xray TUN bridge did not enter running state")
+                }
                 coreController = controller
                 Log.d(TAG, "Xray TUN bridge started for sing-box VPN mode")
             } catch (e: Exception) {
@@ -379,21 +385,50 @@ class BoxService(
     }
 
     private fun stopCore() {
-        try {
-            coreController?.stopLoop()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error stopping core", e)
-        }
+        // Tear down TUN first so VPN traffic stops immediately from user perspective.
+        platformInterface.closeTun()
+        fileDescriptor = null
+
+        val controller = coreController
         coreController = null
         CommandClient.activeCoreController = null
 
-        if (SingboxProcess.isRunning) {
+        try {
+            if (controller != null) {
+                val stopThread = Thread({
+                    try {
+                        controller.stopLoop()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error stopping xray core", e)
+                    }
+                }, "xray-stop-thread")
+                stopThread.isDaemon = true
+                stopThread.start()
+                stopThread.join(1500L)
+                if (stopThread.isAlive) {
+                    Log.w(TAG, "Timed out waiting for xray core stop; continuing shutdown")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping core", e)
+        }
+
+        if (SingboxProcess.isRunning || SingboxProcess.isProcessAlive) {
             SingboxProcess.stop()
             Log.d(TAG, "sing-box process stopped")
         }
+    }
 
-        platformInterface.closeTun()
-        fileDescriptor = null
+    private fun waitForCoreControllerReady(
+        controller: CoreController,
+        timeoutMs: Long = 2500L
+    ): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (controller.isRunning) return true
+            Thread.sleep(80)
+        }
+        return controller.isRunning
     }
 
     @RequiresApi(Build.VERSION_CODES.M)

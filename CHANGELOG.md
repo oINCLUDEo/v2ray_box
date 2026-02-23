@@ -1,3 +1,12 @@
+## 1.0.4 - 2026-02-23
+
+* Android: fixed stale ping loading state after app background/close; ping sessions are now canceled reliably and transient loading states are not persisted.
+* Android: improved core switch/start lifecycle (xray/sing-box) to force clean stop before restart and avoid broken first-connect states.
+* Android: improved xray disconnect responsiveness by closing TUN immediately and bounding core shutdown wait.
+* Android: hardened sing-box process restart/stop flow to avoid stale process issues after repeated engine switches.
+* Example (Android): added Proxy mode endpoint helper card with core-specific local addresses, copy action, and local listener test button.
+* Example (Android): fixed Proxy helper layout overflow on small screens.
+
 ## 1.0.3 - 2026-02-22
 
 * Android: improved sing-box config generation (DNS/route defaults, transport normalization, domain resolver handling) for better compatibility with V2Ray links.

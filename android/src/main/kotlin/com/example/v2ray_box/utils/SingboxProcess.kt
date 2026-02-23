@@ -5,6 +5,7 @@ import android.util.Log
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.TimeUnit
 
 object SingboxProcess {
     private const val TAG = "V2Ray/SingboxProcess"
@@ -13,6 +14,8 @@ object SingboxProcess {
     private var process: Process? = null
     @Volatile var isRunning: Boolean = false
         private set
+    val isProcessAlive: Boolean
+        get() = process?.isAlive == true
 
     fun getBinaryPath(context: Context): String? {
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
@@ -41,9 +44,10 @@ object SingboxProcess {
     }
 
     fun start(context: Context, configPath: String): Boolean {
-        if (isRunning) {
-            Log.w(TAG, "sing-box is already running")
-            return true
+        if (isRunning || isProcessAlive) {
+            Log.w(TAG, "sing-box is already running, restarting with latest config")
+            stop()
+            Thread.sleep(150)
         }
 
         val binaryPath = getBinaryPath(context) ?: run {
@@ -59,12 +63,13 @@ object SingboxProcess {
                 .directory(workDir)
                 .redirectErrorStream(true)
 
-            process = pb.start()
+            val proc = pb.start()
+            process = proc
             isRunning = true
 
             Thread {
                 try {
-                    process?.inputStream?.bufferedReader()?.forEachLine { line ->
+                    proc.inputStream.bufferedReader().forEachLine { line ->
                         Log.i("SingboxCore", line)
                     }
                 } catch (_: Exception) {}
@@ -72,17 +77,19 @@ object SingboxProcess {
 
             Thread {
                 try {
-                    val exitCode = process?.waitFor() ?: -1
+                    val exitCode = proc.waitFor()
                     Log.d(TAG, "sing-box process exited with code: $exitCode")
                 } catch (_: InterruptedException) {
                 } finally {
                     isRunning = false
-                    process = null
+                    if (process == proc) {
+                        process = null
+                    }
                 }
             }.start()
 
             Thread.sleep(500)
-            if (process?.isAlive == true) {
+            if (proc.isAlive) {
                 Log.d(TAG, "sing-box started successfully")
                 true
             } else {
@@ -100,20 +107,29 @@ object SingboxProcess {
     }
 
     fun stop() {
+        val proc = process
+        if (proc == null && !isRunning) {
+            return
+        }
         try {
-            process?.let { proc ->
+            proc?.let {
                 Log.d(TAG, "Stopping sing-box process")
-                proc.destroy()
-                try {
-                    proc.waitFor()
-                } catch (_: InterruptedException) {
-                    proc.destroyForcibly()
+                it.destroy()
+                val exited = runCatching {
+                    it.waitFor(1200, TimeUnit.MILLISECONDS)
+                }.getOrDefault(false)
+                if (!exited) {
+                    Log.w(TAG, "sing-box did not stop gracefully, forcing stop")
+                    it.destroyForcibly()
+                    runCatching { it.waitFor(1000, TimeUnit.MILLISECONDS) }
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping sing-box", e)
         } finally {
-            process = null
+            if (process == proc) {
+                process = null
+            }
             isRunning = false
         }
     }
