@@ -4,7 +4,7 @@
 //
 
 import NetworkExtension
-import HiddifyCore
+import Libbox
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     
@@ -129,7 +129,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // sleep/wake lifecycle handled by MobilePause/MobileWake when iOS backgrounding support is needed
 }
 
-// MARK: - Platform Interface (modeled after hiddify-app's ExtensionPlatformInterface)
+// MARK: - Platform Interface
 
 class ExtensionPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol {
     private weak var tunnel: PacketTunnelProvider?

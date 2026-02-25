@@ -2,7 +2,7 @@ import Flutter
 import UIKit
 import NetworkExtension
 import Network
-import HiddifyCore
+import Libbox
 
 public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     private var methodChannel: FlutterMethodChannel?

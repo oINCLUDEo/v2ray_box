@@ -20,29 +20,32 @@ import com.example.v2ray_box.V2rayBoxPlugin
 import com.example.v2ray_box.constant.Action
 import com.example.v2ray_box.constant.Alert
 import com.example.v2ray_box.constant.CoreEngine
+import com.example.v2ray_box.constant.PerAppProxyMode
 import com.example.v2ray_box.constant.ServiceMode
 import com.example.v2ray_box.constant.Status
 import com.example.v2ray_box.utils.CommandClient
+import com.example.v2ray_box.utils.CoreCompatibility
 import com.example.v2ray_box.utils.SingboxConfigParser
 import com.example.v2ray_box.utils.SingboxProcess
 import com.example.v2ray_box.utils.XrayConfigParser
+import com.example.v2ray_box.xray.XrayBridge
+import com.example.v2ray_box.xray.XrayCallbackHandler
+import com.example.v2ray_box.xray.XrayCoreController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import libv2ray.CoreCallbackHandler
-import libv2ray.CoreController
-import libv2ray.Libv2ray
 import java.io.File
 
 class BoxService(
     private val service: Service,
     private val platformInterface: PlatformInterfaceWrapper
-) : CoreCallbackHandler {
+) : XrayCallbackHandler {
 
     companion object {
         private const val TAG = "V2Ray/BoxService"
+        private const val XRAY_DNS_SERVER = "1.1.1.1:53"
 
         private var initializeOnce = false
         private var workingDir: File? = null
@@ -59,16 +62,47 @@ class BoxService(
             if (initializeOnce) return
             val wDir = getWorkingDir(context)
             Log.d(TAG, "working dir: ${wDir.path}")
-            Libv2ray.initCoreEnv(wDir.path, "")
+            XrayBridge.initCoreEnv(context, wDir.path)
             initializeOnce = true
         }
 
-        fun parseConfig(context: Context, configLink: String, debug: Boolean): String {
+        private fun buildXrayConfigWithLibParserFallback(
+            context: Context,
+            configLink: String,
+            proxyOnly: Boolean
+        ): String {
+            initialize(context)
+            // Prefer libXray parser for parity with Xray-core link parsing behavior.
+            val libOutbound = XrayBridge.parseFirstOutboundFromShareLink(configLink)
+            if (libOutbound != null) {
+                return XrayConfigParser.buildXrayConfigFromOutbound(libOutbound, proxyOnly)
+            }
+
+            // Local parser is retained as a fallback for cases not handled by libXray parser.
+            val localOutbound = XrayConfigParser.parseLink(configLink)
+                ?: throw IllegalArgumentException("Invalid or unsupported config link")
+            return XrayConfigParser.buildXrayConfigFromOutbound(localOutbound, proxyOnly)
+        }
+
+        private fun resolveRuntimeEngineForLink(
+            configLink: String,
+            preferredEngine: String
+        ): String {
+            return CoreCompatibility.resolveEngineForLink(preferredEngine, configLink)
+        }
+
+        fun parseConfig(
+            context: Context,
+            configLink: String,
+            debug: Boolean,
+            preferredEngine: String = Settings.coreEngine
+        ): String {
             return try {
-                if (Settings.coreEngine == CoreEngine.SINGBOX) {
+                val engine = resolveRuntimeEngineForLink(configLink, preferredEngine)
+                if (engine == CoreEngine.SINGBOX) {
                     SingboxConfigParser.buildSingboxConfig(configLink)
                 } else {
-                    XrayConfigParser.buildXrayConfig(configLink)
+                    buildXrayConfigWithLibParserFallback(context, configLink, proxyOnly = false)
                 }
                 ""
             } catch (e: Exception) {
@@ -77,19 +111,28 @@ class BoxService(
             }
         }
 
-        fun buildConfig(context: Context, configLink: String): String {
+        fun buildConfig(
+            context: Context,
+            configLink: String,
+            preferredEngine: String = Settings.coreEngine
+        ): String {
             val proxyOnly = Settings.serviceMode == ServiceMode.PROXY
-            return if (Settings.coreEngine == CoreEngine.SINGBOX) {
+            val engine = resolveRuntimeEngineForLink(configLink, preferredEngine)
+            return if (engine == CoreEngine.SINGBOX) {
                 SingboxConfigParser.buildSingboxConfig(configLink, !proxyOnly)
             } else {
-                XrayConfigParser.buildXrayConfig(configLink, proxyOnly)
+                buildXrayConfigWithLibParserFallback(context, configLink, proxyOnly)
             }
         }
 
-        fun writeConfigFile(context: Context, configLink: String): String {
+        fun writeConfigFile(
+            context: Context,
+            configLink: String,
+            preferredEngine: String = Settings.coreEngine
+        ): String {
             val wDir = getWorkingDir(context)
             val proxyOnly = Settings.serviceMode == ServiceMode.PROXY
-            val engine = Settings.coreEngine
+            val engine = resolveRuntimeEngineForLink(configLink, preferredEngine)
 
             if (engine == CoreEngine.SINGBOX) {
                 val config = SingboxConfigParser.buildSingboxConfig(configLink, false)
@@ -98,7 +141,7 @@ class BoxService(
                 Log.d(TAG, "Sing-box config written to: ${configFile.absolutePath}")
 
                 if (!proxyOnly) {
-                    val bridgeConfig = buildXrayTunBridge()
+                    val bridgeConfig = buildXrayTunBridge(context)
                     val bridgeFile = File(wDir, "active_config.json")
                     bridgeFile.writeText(bridgeConfig)
                     Log.d(TAG, "Xray TUN bridge config written")
@@ -106,7 +149,7 @@ class BoxService(
 
                 return configFile.absolutePath
             } else {
-                val config = XrayConfigParser.buildXrayConfig(configLink, proxyOnly)
+                val config = buildXrayConfigWithLibParserFallback(context, configLink, proxyOnly)
                 val configFile = File(wDir, "active_config.json")
                 configFile.writeText(config)
                 Log.d(TAG, "Config written to: ${configFile.absolutePath}")
@@ -114,19 +157,48 @@ class BoxService(
             }
         }
 
-        private fun buildXrayTunBridge(): String {
+        private fun buildXrayTunBridge(context: Context): String {
+            val tunSettings = mutableMapOf<String, Any>(
+                "name" to "xray0",
+                "MTU" to 1500,
+                "userLevel" to 8
+            )
+            val perAppMode = Settings.perAppProxyMode
+            val perAppList = Settings.perAppProxyList
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+
+            when (perAppMode) {
+                PerAppProxyMode.INCLUDE -> {
+                    if (perAppList.isNotEmpty()) {
+                        tunSettings["includedPackage"] = perAppList
+                    }
+                }
+                PerAppProxyMode.EXCLUDE -> {
+                    val excludedPackages = linkedSetOf<String>()
+                    excludedPackages.addAll(perAppList)
+                    excludedPackages.add(context.packageName)
+                    tunSettings["excludedPackage"] = excludedPackages.toList()
+                }
+                else -> {
+                    tunSettings["excludedPackage"] = listOf(context.packageName)
+                }
+            }
+
+            Log.d(
+                TAG,
+                "Xray bridge per-app: mode=$perAppMode include=${(tunSettings["includedPackage"] as? List<*>)?.size ?: 0} exclude=${(tunSettings["excludedPackage"] as? List<*>)?.size ?: 0}"
+            )
+
             val config = mapOf(
-                "log" to mapOf("loglevel" to "warning"),
+                "log" to mapOf("loglevel" to if (Settings.debugMode) "debug" else "warning"),
                 "inbounds" to listOf(
                     mapOf(
                         "tag" to "tun",
                         "port" to 0,
                         "protocol" to "tun",
-                        "settings" to mapOf(
-                            "name" to "xray0",
-                            "MTU" to 1500,
-                            "userLevel" to 8
-                        ),
+                        "settings" to tunSettings,
                         "sniffing" to mapOf(
                             "enabled" to true,
                             "destOverride" to listOf("http", "tls")
@@ -210,7 +282,7 @@ class BoxService(
     }
 
     var fileDescriptor: ParcelFileDescriptor? = null
-    var coreController: CoreController? = null
+    var coreController: XrayCoreController? = null
         private set
 
     private val status = MutableLiveData(Status.Stopped)
@@ -234,20 +306,35 @@ class BoxService(
 
     private var activeProfileName = ""
 
+    private fun emitServiceLog(message: String, force: Boolean = false) {
+        if (!force && !Settings.debugMode) return
+        val trimmed = message.trim()
+        if (trimmed.isEmpty()) return
+        binder.broadcast {
+            it.onServiceWriteLog(trimmed)
+        }
+    }
+
     @Suppress("DEPRECATION")
     private suspend fun startService() {
         try {
             if (coreController != null || SingboxProcess.isRunning || SingboxProcess.isProcessAlive) {
                 Log.w(TAG, "Detected stale core state before start, forcing cleanup")
+                emitServiceLog("Stale core state detected, cleaning up before start", force = true)
                 stopCore(async = false, closeTun = true)
             }
-            Log.d(TAG, "starting service (engine: ${Settings.coreEngine})")
+            Log.d(TAG, "starting service (engine: ${Settings.effectiveCoreEngine()})")
+            emitServiceLog(
+                "Starting service (engine=${Settings.effectiveCoreEngine()}, mode=${Settings.serviceMode})",
+                force = true
+            )
             withContext(Dispatchers.Main) {
                 notification.show(activeProfileName, "Starting...")
             }
 
             val selectedConfigPath = Settings.activeConfigPath
             if (selectedConfigPath.isBlank()) {
+                emitServiceLog("Start failed: empty active config path", force = true)
                 stopAndAlert(Alert.EmptyConfiguration)
                 return
             }
@@ -256,6 +343,7 @@ class BoxService(
 
             if (!File(selectedConfigPath).exists()) {
                 Log.w(TAG, "Config file not found: $selectedConfigPath")
+                emitServiceLog("Start failed: config file not found", force = true)
                 stopAndAlert(Alert.EmptyConfiguration, "Config file not found")
                 return
             }
@@ -269,9 +357,10 @@ class BoxService(
 
             DefaultNetworkMonitor.start()
             Log.d(TAG, "DefaultNetworkMonitor started")
+            emitServiceLog("Network monitor started")
 
             val isVpnMode = Settings.serviceMode == ServiceMode.VPN
-            val engine = Settings.coreEngine
+            val engine = Settings.effectiveCoreEngine()
 
             val started = if (engine == CoreEngine.SINGBOX) {
                 startSingboxEngine(isVpnMode)
@@ -283,6 +372,7 @@ class BoxService(
 
             status.postValue(Status.Started)
             Log.d(TAG, "Service is now running (engine: $engine)")
+            emitServiceLog("Service connected (engine=$engine)", force = true)
 
             withContext(Dispatchers.Main) {
                 notification.show(activeProfileName, "Connected")
@@ -290,27 +380,39 @@ class BoxService(
             notification.start()
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error in startService", e)
+            emitServiceLog("Unexpected startService error: ${e.message}", force = true)
             stopAndAlert(Alert.StartService, e.message)
         }
     }
 
     private suspend fun startXrayEngine(isVpnMode: Boolean): Boolean {
         val content = File(Settings.activeConfigPath).readText()
+        emitServiceLog("Starting Xray engine (vpnMode=$isVpnMode)")
 
         var tunFd = 0
         if (isVpnMode) {
             val pfd = platformInterface.createTun()
             if (pfd == null) {
+                emitServiceLog("Xray start failed: unable to create TUN", force = true)
                 stopAndAlert(Alert.StartService, "Failed to create TUN interface")
                 return false
             }
             tunFd = pfd.fd
             Log.d(TAG, "TUN created with fd=$tunFd")
+            emitServiceLog("TUN created with fd=$tunFd")
         }
 
         try {
             Log.d(TAG, "Starting Xray core...")
-            val controller = Libv2ray.newCoreController(this)
+            if (isVpnMode) {
+                XrayBridge.configureSocketProtection(
+                    protectFd = { fd -> platformInterface.autoDetectInterfaceControl(fd) },
+                    dnsServer = XRAY_DNS_SERVER
+                )
+            } else {
+                XrayBridge.configureSocketProtection(null)
+            }
+            val controller = XrayBridge.newCoreController(this)
             controller.startLoop(content, tunFd)
             if (!waitForCoreControllerReady(controller)) {
                 throw IllegalStateException("Xray core did not enter running state")
@@ -318,9 +420,11 @@ class BoxService(
             coreController = controller
             CommandClient.activeCoreController = controller
             Log.d(TAG, "Xray core started successfully")
+            emitServiceLog("Xray core started successfully", force = true)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start Xray core", e)
+            emitServiceLog("Xray start failed: ${e.message}", force = true)
             platformInterface.closeTun()
             stopAndAlert(Alert.StartService, e.message)
             return false
@@ -330,27 +434,33 @@ class BoxService(
     private suspend fun startSingboxEngine(isVpnMode: Boolean): Boolean {
         val singboxConfigPath = Settings.activeConfigPath
         Log.d(TAG, "Starting sing-box engine...")
+        emitServiceLog("Starting sing-box engine (vpnMode=$isVpnMode)")
 
         if (!SingboxProcess.start(service, singboxConfigPath)) {
+            emitServiceLog("sing-box start failed", force = true)
             stopAndAlert(Alert.StartService, "Failed to start sing-box process")
             return false
         }
         if (!SingboxProcess.waitForMixedInboundReady()) {
             SingboxProcess.stop()
+            emitServiceLog("sing-box inbound not ready", force = true)
             stopAndAlert(Alert.StartService, "sing-box inbound not ready on 127.0.0.1:10808")
             return false
         }
         Log.d(TAG, "sing-box process started")
+        emitServiceLog("sing-box process started", force = true)
 
         if (isVpnMode) {
             val pfd = platformInterface.createTun()
             if (pfd == null) {
                 SingboxProcess.stop()
+                emitServiceLog("sing-box vpn bridge failed: unable to create TUN", force = true)
                 stopAndAlert(Alert.StartService, "Failed to create TUN interface")
                 return false
             }
             val tunFd = pfd.fd
             Log.d(TAG, "TUN created with fd=$tunFd, starting Xray TUN bridge...")
+            emitServiceLog("TUN created with fd=$tunFd for sing-box bridge")
 
             try {
                 val wDir = getWorkingDir(service)
@@ -358,21 +468,28 @@ class BoxService(
                 if (!bridgeConfigFile.exists()) {
                     SingboxProcess.stop()
                     platformInterface.closeTun()
+                    emitServiceLog("sing-box vpn bridge failed: bridge config missing", force = true)
                     stopAndAlert(Alert.StartService, "TUN bridge config not found")
                     return false
                 }
                 val bridgeContent = bridgeConfigFile.readText()
-                val controller = Libv2ray.newCoreController(this)
+                XrayBridge.configureSocketProtection(
+                    protectFd = { fd -> platformInterface.autoDetectInterfaceControl(fd) },
+                    dnsServer = XRAY_DNS_SERVER
+                )
+                val controller = XrayBridge.newCoreController(this)
                 controller.startLoop(bridgeContent, tunFd)
                 if (!waitForCoreControllerReady(controller)) {
                     throw IllegalStateException("Xray TUN bridge did not enter running state")
                 }
                 coreController = controller
                 Log.d(TAG, "Xray TUN bridge started for sing-box VPN mode")
+                emitServiceLog("Xray TUN bridge started for sing-box VPN mode", force = true)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start Xray TUN bridge", e)
                 SingboxProcess.stop()
                 platformInterface.closeTun()
+                emitServiceLog("sing-box vpn bridge failed: ${e.message}", force = true)
                 stopAndAlert(Alert.StartService, "TUN bridge failed: ${e.message}")
                 return false
             }
@@ -438,6 +555,9 @@ class BoxService(
             }
         }
 
+        // Ensure libXray Android socket/DNS hooks are reset when service stops.
+        XrayBridge.configureSocketProtection(null)
+
         if (closeTun) {
             platformInterface.closeTun()
             fileDescriptor = null
@@ -445,7 +565,7 @@ class BoxService(
     }
 
     private fun waitForCoreControllerReady(
-        controller: CoreController,
+        controller: XrayCoreController,
         timeoutMs: Long = 2500L
     ): Boolean {
         val start = System.currentTimeMillis()
@@ -470,6 +590,7 @@ class BoxService(
     @Suppress("DEPRECATION")
     private fun stopService() {
         if (status.value == Status.Stopped || status.value == Status.Stopping) return
+        emitServiceLog("Stopping service", force = true)
         status.value = Status.Stopping
         if (receiverRegistered) {
             service.unregisterReceiver(receiver)
@@ -484,6 +605,7 @@ class BoxService(
         GlobalScope.launch(Dispatchers.IO) {
             stopCore(async = true, closeTun = false)
             DefaultNetworkMonitor.stop()
+            emitServiceLog("Service stopped", force = true)
 
             Settings.startedByUser = false
             status.postValue(Status.Stopped)
@@ -491,6 +613,7 @@ class BoxService(
     }
 
     private suspend fun stopAndAlert(type: Alert, message: String? = null) {
+        emitServiceLog("Stopping service with alert ${type.name}: ${message ?: ""}".trim(), force = true)
         Settings.startedByUser = false
         platformInterface.closeTun()
         fileDescriptor = null
@@ -514,6 +637,7 @@ class BoxService(
     fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (status.value != Status.Stopped) return Service.START_NOT_STICKY
         status.value = Status.Starting
+        emitServiceLog("onStartCommand received", force = true)
 
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(service, receiver, IntentFilter().apply {
@@ -539,6 +663,7 @@ class BoxService(
     }
 
     fun onDestroy() {
+        emitServiceLog("Service onDestroy", force = true)
         if (receiverRegistered) {
             runCatching { service.unregisterReceiver(receiver) }
             receiverRegistered = false
@@ -562,11 +687,13 @@ class BoxService(
 
     override fun startup(): Long {
         Log.d(TAG, "CoreCallbackHandler: startup")
+        emitServiceLog("Core callback: startup", force = true)
         return 0
     }
 
     override fun shutdown(): Long {
         Log.d(TAG, "CoreCallbackHandler: shutdown")
+        emitServiceLog("Core callback: shutdown", force = true)
         mainHandler.post {
             stopService()
         }
@@ -575,8 +702,10 @@ class BoxService(
 
     override fun onEmitStatus(status: Long, message: String?): Long {
         Log.d(TAG, "CoreCallbackHandler: onEmitStatus status=$status, msg=$message")
-        binder.broadcast {
-            it.onServiceWriteLog(message ?: "")
+        if (!message.isNullOrBlank()) {
+            emitServiceLog("Core status[$status]: ${message.trim()}", force = true)
+        } else {
+            emitServiceLog("Core status[$status]")
         }
         if (message?.contains("core stopped", ignoreCase = true) == true) {
             mainHandler.post {

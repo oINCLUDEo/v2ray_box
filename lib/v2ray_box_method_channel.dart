@@ -350,6 +350,12 @@ class MethodChannelV2rayBox extends V2rayBoxPlatform {
   }
 
   @override
+  Future<bool> clearLogs() async {
+    final result = await methodChannel.invokeMethod<bool>('clear_logs');
+    return result ?? false;
+  }
+
+  @override
   Stream<Map<String, dynamic>> watchLogs() {
     return logsChannel.receiveBroadcastStream().map((event) {
       if (event is Map) {

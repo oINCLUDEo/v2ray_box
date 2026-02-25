@@ -11,6 +11,8 @@ object SingboxProcess {
     private const val TAG = "V2Ray/SingboxProcess"
     private const val MIXED_INBOUND_HOST = "127.0.0.1"
     private const val MIXED_INBOUND_PORT = 10808
+    private val semverRegex = Regex("""\b(?:v)?(\d+\.\d+\.\d+(?:[-+._][0-9A-Za-z.-]+)?)\b""")
+    private val versionLineRegex = Regex("""sing-box version\s+(\S+)""", RegexOption.IGNORE_CASE)
     private var process: Process? = null
     @Volatile var isRunning: Boolean = false
         private set
@@ -35,12 +37,25 @@ object SingboxProcess {
                 .start()
             val output = proc.inputStream.bufferedReader().readText().trim()
             proc.waitFor()
-            val match = Regex("""sing-box version (\S+)""").find(output)
-            match?.groupValues?.get(1) ?: output.lines().firstOrNull()?.trim() ?: ""
+            normalizeVersion(output)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get sing-box version", e)
             ""
         }
+    }
+
+    private fun normalizeVersion(output: String): String {
+        if (output.isBlank()) return ""
+
+        val semver = semverRegex.find(output)?.groupValues?.getOrNull(1)
+        if (!semver.isNullOrBlank()) return semver
+
+        val fromVersionLine = versionLineRegex.find(output)?.groupValues?.getOrNull(1)
+        if (!fromVersionLine.isNullOrBlank()) return fromVersionLine.removePrefix("v")
+
+        val firstLine = output.lineSequence().firstOrNull()?.trim().orEmpty()
+        if (firstLine.isBlank()) return ""
+        return firstLine.removePrefix("v")
     }
 
     fun start(context: Context, configPath: String): Boolean {

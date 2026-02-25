@@ -264,6 +264,11 @@ class V2rayBox {
     return V2rayBoxPlatform.instance.getLogs();
   }
 
+  /// Clear current log buffer on both app side and native side
+  Future<bool> clearLogs() {
+    return V2rayBoxPlatform.instance.clearLogs();
+  }
+
   /// Watch live log stream from the core engine
   Stream<Map<String, dynamic>> watchLogs() {
     return V2rayBoxPlatform.instance.watchLogs();

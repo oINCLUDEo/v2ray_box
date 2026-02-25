@@ -9,32 +9,77 @@ class SingboxProcess {
     
     private init() {}
     
-    func getBinaryPath() -> String? {
-        let binaryName = "sing-box"
-        
-        var possiblePaths: [String] = []
+    private func defaultCorePaths(binaryName: String) -> [String] {
+        var paths: [String] = []
+        if let customPath = ProcessInfo.processInfo.environment["V2RAY_BOX_SINGBOX_PATH"], !customPath.isEmpty {
+            paths.append(customPath)
+        }
+        if let coreDir = ProcessInfo.processInfo.environment["V2RAY_BOX_CORE_DIR"], !coreDir.isEmpty {
+            paths.append("\(coreDir)/\(binaryName)")
+        }
+        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            if let bundleId = Bundle.main.bundleIdentifier, !bundleId.isEmpty {
+                paths.append(appSupport.appendingPathComponent(bundleId).appendingPathComponent("v2ray_box/cores/\(binaryName)").path)
+            }
+            paths.append(appSupport.appendingPathComponent("v2ray_box/cores/\(binaryName)").path)
+        }
+        return paths
+    }
+    
+    private func bundleCorePaths(binaryName: String) -> [String] {
+        var paths: [String] = []
         
         if let executablePath = Bundle.main.executablePath {
             let contentsPath = (executablePath as NSString).deletingLastPathComponent
-            possiblePaths.append("\(contentsPath)/../Frameworks/\(binaryName)")
-            possiblePaths.append("\(contentsPath)/../Resources/\(binaryName)")
-            possiblePaths.append("\(contentsPath)/\(binaryName)")
+            paths.append("\(contentsPath)/../Frameworks/\(binaryName)")
+            paths.append("\(contentsPath)/../Resources/\(binaryName)")
+            paths.append("\(contentsPath)/\(binaryName)")
         }
-        if let mainBundlePath = Bundle.main.resourcePath {
-            possiblePaths.append("\(mainBundlePath)/../Frameworks/\(binaryName)")
-            possiblePaths.append("\(mainBundlePath)/\(binaryName)")
+        if let resourcePath = Bundle.main.resourcePath {
+            paths.append("\(resourcePath)/../Frameworks/\(binaryName)")
+            paths.append("\(resourcePath)/\(binaryName)")
         }
         
         let bundle = Bundle(for: type(of: self))
         if let bundlePath = bundle.resourcePath {
-            possiblePaths.append("\(bundlePath)/../Frameworks/\(binaryName)")
-            possiblePaths.append("\(bundlePath)/Frameworks/\(binaryName)")
-            possiblePaths.append("\(bundlePath)/\(binaryName)")
+            paths.append("\(bundlePath)/../Frameworks/\(binaryName)")
+            paths.append("\(bundlePath)/Frameworks/\(binaryName)")
+            paths.append("\(bundlePath)/\(binaryName)")
         }
         
+        return paths
+    }
+    
+    private func ensureExecutable(path: String) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return false }
+        if fm.isExecutableFile(atPath: path) { return true }
+        do {
+            try fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))], ofItemAtPath: path)
+        } catch {
+            print("V2rayBox: Failed to chmod sing-box binary at \(path): \(error)")
+        }
+        return fm.isExecutableFile(atPath: path)
+    }
+    
+    private func uniquePaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for path in paths where !path.isEmpty {
+            if !seen.contains(path) {
+                seen.insert(path)
+                result.append(path)
+            }
+        }
+        return result
+    }
+    
+    func getBinaryPath() -> String? {
+        let binaryName = "sing-box"
+        let possiblePaths = uniquePaths(defaultCorePaths(binaryName: binaryName) + bundleCorePaths(binaryName: binaryName))
+        
         for path in possiblePaths {
-            if FileManager.default.fileExists(atPath: path),
-               FileManager.default.isExecutableFile(atPath: path) {
+            if ensureExecutable(path: path) {
                 print("V2rayBox: Found sing-box binary at \(path)")
                 return path
             }

@@ -5,6 +5,7 @@ import android.util.Base64
 import android.util.Log
 import com.example.v2ray_box.bg.ProxyService
 import com.example.v2ray_box.bg.VPNService
+import com.example.v2ray_box.constant.CoreEngine
 import com.example.v2ray_box.constant.PerAppProxyMode
 import com.example.v2ray_box.constant.ServiceMode
 import com.example.v2ray_box.constant.SettingsKey
@@ -156,6 +157,19 @@ object Settings {
     var coreEngine: String
         get() = preferences.getString(SettingsKey.CORE_ENGINE, com.example.v2ray_box.constant.CoreEngine.XRAY)!!
         set(value) = preferences.edit().putString(SettingsKey.CORE_ENGINE, value).apply()
+
+    var activeRuntimeEngine: String
+        get() = preferences.getString(SettingsKey.ACTIVE_RUNTIME_ENGINE, "")!!
+        set(value) = preferences.edit().putString(SettingsKey.ACTIVE_RUNTIME_ENGINE, value).apply()
+
+    fun effectiveCoreEngine(): String {
+        val runtime = activeRuntimeEngine.trim().lowercase()
+        return if (runtime == CoreEngine.XRAY || runtime == CoreEngine.SINGBOX) {
+            runtime
+        } else {
+            coreEngine
+        }
+    }
 
     // Traffic storage (persisted across app sessions)
     var totalUploadTraffic: Long

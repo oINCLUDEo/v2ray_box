@@ -9,8 +9,8 @@
 /* Begin PBXBuildFile section */
 		11ABC4052F0E6C9800C14FFA /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4042F0E6C9800C14FFA /* NetworkExtension.framework */; };
 		11ABC40D2F0E6C9800C14FFA /* PacketTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 11ABC4032F0E6C9800C14FFA /* PacketTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		11ABC4162F0E6ECA00C14FFA /* HiddifyCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4152F0E6ECA00C14FFA /* HiddifyCore.xcframework */; };
-		11ABC4172F0E6ECA00C14FFA /* HiddifyCore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4152F0E6ECA00C14FFA /* HiddifyCore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		11ABC4162F0E6ECA00C14FFA /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4152F0E6ECA00C14FFA /* Libbox.xcframework */; };
+		11ABC4172F0E6ECA00C14FFA /* Libbox.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4152F0E6ECA00C14FFA /* Libbox.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		11ABC4422F0E703C00C14FFA /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4412F0E702E00C14FFA /* libresolv.tbd */; };
 		11ABC4432F0E705100C14FFA /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 11ABC4412F0E702E00C14FFA /* libresolv.tbd */; };
 		11ABC48F2F0E79E000C14FFA /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 018CF6388C858D7D84ACFE91 /* Pods_Runner.framework */; };
@@ -67,7 +67,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				11ABC4172F0E6ECA00C14FFA /* HiddifyCore.xcframework in Embed Frameworks */,
+				11ABC4172F0E6ECA00C14FFA /* Libbox.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -90,7 +90,7 @@
 		11ABC4032F0E6C9800C14FFA /* PacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		11ABC4042F0E6C9800C14FFA /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		11ABC4142F0E6CFF00C14FFA /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
-		11ABC4152F0E6ECA00C14FFA /* HiddifyCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = HiddifyCore.xcframework; path = Frameworks/HiddifyCore.xcframework; sourceTree = "<group>"; };
+		11ABC4152F0E6ECA00C14FFA /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = Frameworks/Libbox.xcframework; sourceTree = "<group>"; };
 		11ABC4412F0E702E00C14FFA /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
@@ -146,7 +146,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				11ABC4162F0E6ECA00C14FFA /* HiddifyCore.xcframework in Frameworks */,
+				11ABC4162F0E6ECA00C14FFA /* Libbox.xcframework in Frameworks */,
 				11ABC4052F0E6C9800C14FFA /* NetworkExtension.framework in Frameworks */,
 				11ABC4422F0E703C00C14FFA /* libresolv.tbd in Frameworks */,
 				11ABC4432F0E705100C14FFA /* libresolv.tbd in Frameworks */,
@@ -247,7 +247,7 @@
 			isa = PBXGroup;
 			children = (
 				11ABC4412F0E702E00C14FFA /* libresolv.tbd */,
-				11ABC4152F0E6ECA00C14FFA /* HiddifyCore.xcframework */,
+				11ABC4152F0E6ECA00C14FFA /* Libbox.xcframework */,
 				018CF6388C858D7D84ACFE91 /* Pods_Runner.framework */,
 				E69C0E16D913F4E91FC49933 /* Pods_RunnerTests.framework */,
 				11ABC4042F0E6C9800C14FFA /* NetworkExtension.framework */,

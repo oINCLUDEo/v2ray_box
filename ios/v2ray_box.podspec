@@ -10,12 +10,12 @@ Pod::Spec.new do |s|
 A Flutter plugin for V2Ray VPN functionality supporting both Xray-core and sing-box engines.
 
 For sing-box (default core):
-  The HiddifyCore.xcframework (or equivalent sing-box framework) must be downloaded
-  separately and placed in your app's ios/Frameworks/ directory.
+  Build Libbox.xcframework from the official SagerNet/sing-box repository
+  and place it in your app's ios/Frameworks/ directory.
 
 For Xray-core:
-  Xray support requires a compatible iOS framework (e.g., libXray).
-  The config builder generates Xray-compatible JSON configuration.
+  Xray support requires custom PacketTunnel integration with XTLS/libXray.
+  The default PacketTunnel shipped by this plugin runs sing-box only.
                        DESC
   s.homepage         = 'https://github.com/example/v2ray_box'
   s.license          = { :file => '../LICENSE' }
@@ -25,9 +25,9 @@ For Xray-core:
   s.dependency 'Flutter'
   s.platform         = :ios, '15.0'
   
-  # HiddifyCore.xcframework is NOT bundled with this plugin package.
-  # Developers must download it and place it at ios/Frameworks/HiddifyCore.xcframework in their app.
-  s.vendored_frameworks = 'Frameworks/HiddifyCore.xcframework'
+  # Libbox.xcframework is NOT bundled with this plugin package.
+  # Build it from official sing-box source and place it at ios/Frameworks/Libbox.xcframework.
+  s.vendored_frameworks = 'Frameworks/Libbox.xcframework'
   
   s.frameworks = 'NetworkExtension'
   s.libraries = 'resolv'

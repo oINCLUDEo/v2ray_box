@@ -43,6 +43,10 @@ class _LogsPageState extends State<LogsPage> {
 
   void _startStream() {
     _logSub = widget.v2rayBox.watchLogs().listen((event) {
+      if (event['cleared'] == true && mounted) {
+        setState(() => _logs.clear());
+        return;
+      }
       final msg = event['message'] as String?;
       if (msg != null && mounted) {
         setState(() {
@@ -78,8 +82,9 @@ class _LogsPageState extends State<LogsPage> {
     );
   }
 
-  void _clearLogs() {
+  Future<void> _clearLogs() async {
     setState(() => _logs.clear());
+    await widget.v2rayBox.clearLogs();
   }
 
   @override
@@ -91,7 +96,8 @@ class _LogsPageState extends State<LogsPage> {
 
   Color _getLogColor(String log) {
     final lower = log.toLowerCase();
-    if (lower.contains('error') || lower.contains('fatal')) return const Color(0xFFE74C3C);
+    if (lower.contains('error') || lower.contains('fatal'))
+      return const Color(0xFFE74C3C);
     if (lower.contains('warn')) return const Color(0xFFFFA502);
     if (lower.contains('debug') || lower.contains('trace')) return Colors.grey;
     if (lower.contains('info')) return const Color(0xFF00D9FF);
@@ -108,20 +114,40 @@ class _LogsPageState extends State<LogsPage> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Logs',
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.white),
+                Text(
+                  'Logs',
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
                 ),
                 Row(
                   children: [
                     IconButton(
-                      icon: Icon(_autoScroll ? Icons.vertical_align_bottom : Icons.vertical_align_top,
-                        color: _autoScroll ? const Color(0xFF00D9FF) : Colors.grey,
+                      icon: Icon(
+                        _autoScroll
+                            ? Icons.vertical_align_bottom
+                            : Icons.vertical_align_top,
+                        color: _autoScroll
+                            ? const Color(0xFF00D9FF)
+                            : Colors.grey,
                       ),
-                      onPressed: () => setState(() => _autoScroll = !_autoScroll),
-                      tooltip: _autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF',
+                      onPressed: () =>
+                          setState(() => _autoScroll = !_autoScroll),
+                      tooltip: _autoScroll
+                          ? 'Auto-scroll ON'
+                          : 'Auto-scroll OFF',
                     ),
-                    IconButton(icon: const Icon(Icons.copy), onPressed: _copyLogs, tooltip: 'Copy'),
-                    IconButton(icon: const Icon(Icons.delete_sweep), onPressed: _clearLogs, tooltip: 'Clear'),
+                    IconButton(
+                      icon: const Icon(Icons.copy),
+                      onPressed: _copyLogs,
+                      tooltip: 'Copy',
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_sweep),
+                      onPressed: _clearLogs,
+                      tooltip: 'Clear',
+                    ),
                   ],
                 ),
               ],
@@ -131,42 +157,61 @@ class _LogsPageState extends State<LogsPage> {
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _logs.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.article_outlined, size: 64, color: Colors.grey[600]),
-                            const SizedBox(height: 16),
-                            Text('No logs yet', style: TextStyle(color: Colors.grey[400], fontSize: 16)),
-                            const SizedBox(height: 8),
-                            Text('Connect to a server to see logs', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
-                          ],
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.article_outlined,
+                          size: 64,
+                          color: Colors.grey[600],
                         ),
-                      )
-                    : ListView.builder(
-                        controller: _scrollCtrl,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        itemCount: _logs.length,
-                        itemBuilder: (context, index) {
-                          final log = _logs[index];
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 1),
-                            child: Text(
-                              log,
-                              style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 11,
-                                color: _getLogColor(log),
-                                height: 1.4,
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No logs yet',
+                          style: TextStyle(
+                            color: Colors.grey[400],
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Connect to a server to see logs',
+                          style: TextStyle(
+                            color: Colors.grey[600],
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollCtrl,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: _logs.length,
+                    itemBuilder: (context, index) {
+                      final log = _logs[index];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 1),
+                        child: Text(
+                          log,
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            color: _getLogColor(log),
+                            height: 1.4,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
           Padding(
             padding: const EdgeInsets.all(8),
-            child: Text('${_logs.length} entries', style: TextStyle(color: Colors.grey[600], fontSize: 11)),
+            child: Text(
+              '${_logs.length} entries',
+              style: TextStyle(color: Colors.grey[600], fontSize: 11),
+            ),
           ),
         ],
       ),

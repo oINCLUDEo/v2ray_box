@@ -118,7 +118,7 @@ object SingboxConfigParser {
                 link.startsWith("hy2://") || link.startsWith("hysteria2://") -> parseHysteria2(link)
                 link.startsWith("hy://") || link.startsWith("hysteria://") -> parseHysteria(link)
                 link.startsWith("tuic://") -> parseTuic(link)
-                link.startsWith("wg://") -> parseWireGuard(link)
+                link.startsWith("wg://") || link.startsWith("wireguard://") -> parseWireGuard(link)
                 link.startsWith("ssh://") -> parseSsh(link)
                 else -> null
             }

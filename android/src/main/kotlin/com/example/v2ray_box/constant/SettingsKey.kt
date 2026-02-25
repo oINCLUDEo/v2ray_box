@@ -33,5 +33,5 @@ object SettingsKey {
 
     // Core engine selection
     const val CORE_ENGINE = "${KEY_PREFIX}core_engine"
+    const val ACTIVE_RUNTIME_ENGINE = "${KEY_PREFIX}active_runtime_engine"
 }
-
