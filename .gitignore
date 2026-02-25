@@ -31,3 +31,23 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 /build/
 /coverage/
+
+# Core artifacts downloaded/built by example scripts
+/android/libs/*.aar
+/example/android/app/libs/*.aar
+/example/android/app/src/main/jniLibs/*/libsingbox.so
+/example/android/app/src/main/assets/xray/
+/example/ios/Frameworks/Libbox.xcframework
+/example/ios/Frameworks/LibXray.xcframework
+/example/macos/Frameworks/xray
+/example/macos/Frameworks/sing-box
+/example/macos/Frameworks/LibXray.xcframework
+/example/macos/Frameworks/Libbox.xcframework
+/example/macos/Frameworks/geoip.dat
+/example/macos/Frameworks/geosite.dat
+/example/linux/cores/
+/example/windows/cores/
+/ios/Frameworks/Libbox.xcframework
+/ios/Frameworks/LibXray.xcframework
+/macos/Frameworks/LibXray.xcframework
+/clone_temp/

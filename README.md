@@ -35,62 +35,34 @@ dependencies:
 
 ## Platform Setup
 
-> **Important:** Core binary files are **not included** in this plugin due to their large size. You must download them and place them in the correct directory in **your own app**.
+> **Important:** Core files are not bundled with this package. Build them with the scripts below in your app project.
 
-### Android — Xray-core
+### Android Core Build (Script-Based)
 
-1. Download `libv2ray.aar` from [AndroidLibXrayLite releases](https://github.com/2dust/AndroidLibXrayLite/releases)
-2. Place in your app's `android/app/libs/`:
+For Android apps using this package, build cores with these scripts:
 
-```
-your_app/android/app/libs/libv2ray.aar
-```
+1. Copy `example/scripts/build_android_libxray.sh` and/or `example/scripts/build_android_libsingbox.sh` into your app repo (for example: `scripts/`)
+2. Run from app root (or pass `--project-root`)
 
-3. Continue with the shared Android manifest/Gradle section below (`Android — Required Manifest & Gradle Settings`) to add required build settings.
+Example:
 
-### Android — sing-box
-
-1. Go to [sing-box releases](https://github.com/SagerNet/sing-box/releases) and download the Android builds for each architecture you want to support:
-
-| Architecture | Download file | Target devices |
-|---|---|---|
-| `arm64-v8a` | `sing-box-*-android-arm64.tar.gz` | Most modern phones & tablets |
-| `armeabi-v7a` | `sing-box-*-android-armv7.tar.gz` | Older 32-bit ARM devices |
-| `x86_64` | `sing-box-*-android-amd64.tar.gz` | x86 emulators, Chromebooks |
-| `x86` | `sing-box-*-android-386.tar.gz` | Older 32-bit x86 emulators |
-
-2. Extract each `.tar.gz` file. Inside you will find a single binary named `sing-box`.
-
-3. **Rename** each `sing-box` binary to `libsingbox.so` (Android only loads native libraries with `lib` prefix and `.so` extension).
-
-4. Place each renamed binary in the matching `jniLibs` folder inside your app:
-
-```
-your_app/
-└── android/
-    └── app/
-        └── src/
-            └── main/
-                └── jniLibs/
-                    ├── arm64-v8a/
-                    │   └── libsingbox.so      ← from android-arm64
-                    ├── armeabi-v7a/
-                    │   └── libsingbox.so      ← from android-armv7
-                    ├── x86_64/
-                    │   └── libsingbox.so      ← from android-amd64
-                    └── x86/
-                        └── libsingbox.so      ← from android-386
+```bash
+bash ./scripts/build_android_libxray.sh
+bash ./scripts/build_android_libsingbox.sh
 ```
 
-> **Tip:** If you only target modern phones you can just add `arm64-v8a`. For emulator testing add `x86_64` too. You don't need all four architectures — only the ones your app supports.
+Output paths:
 
-**Requirements:** minSdk 24, JDK 17
+- Android Xray: `android/app/libs/libxray.aar`
+- Android sing-box: `android/app/src/main/jniLibs/<abi>/libsingbox.so`
+
+For command usage, flags, and ready-to-run examples, see [`example/scripts/README.md`](example/scripts/README.md).
 
 ### Android — Required Manifest & Gradle Settings
 
-The `example` app includes a few Android settings that are required for stable VPN/proxy behavior. Add them in your own app too.
+Add these Android settings (same as the example app).
 
-1. Add `tools` namespace and required permissions in `android/app/src/main/AndroidManifest.xml`:
+1. Required permissions in `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -110,7 +82,7 @@ The `example` app includes a few Android settings that are required for stable V
 </manifest>
 ```
 
-2. In the same manifest, set cleartext/target attributes and register both services:
+2. Service declarations + cleartext inside `<application>`:
 
 ```xml
 <application
@@ -142,14 +114,7 @@ The `example` app includes a few Android settings that are required for stable V
 </application>
 ```
 
-Notes:
-- `android:usesCleartextTraffic="true"` is needed for local HTTP endpoints used by the plugin (for example `http://127.0.0.1:9090` sing-box Clash API and common HTTP ping URLs).
-- `QUERY_ALL_PACKAGES` is required only if you use Per-App Proxy.
-- Keep `android:permission="android.permission.BIND_VPN_SERVICE"` on `VPNService`.
-
-3. Add required Gradle settings in `android/app/build.gradle` (Groovy) or `android/app/build.gradle.kts` (Kotlin DSL).
-
-For **Groovy** (`build.gradle`):
+3. Required Gradle settings in `android/app/build.gradle` or `build.gradle.kts`:
 
 ```groovy
 android {
@@ -164,12 +129,11 @@ android {
 }
 
 dependencies {
-    // Required when you use Xray-core and put libv2ray.aar in android/app/libs
     implementation fileTree(dir: 'libs', include: ['*.aar'])
 }
 ```
 
-For **Kotlin DSL** (`build.gradle.kts`):
+Kotlin DSL:
 
 ```kotlin
 android {
@@ -184,125 +148,26 @@ android {
 }
 
 dependencies {
-    // Required when you use Xray-core and put libv2ray.aar in android/app/libs
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 }
 ```
 
-### iOS — sing-box (default core)
+Notes:
+- `android:usesCleartextTraffic="true"` is required for local HTTP endpoints (e.g. `127.0.0.1:9090`).
+- Keep `android:permission="android.permission.BIND_VPN_SERVICE"` on `VPNService`.
+- `QUERY_ALL_PACKAGES` is only needed for Per-App Proxy.
 
-iOS uses the **HiddifyCore.xcframework** (which wraps sing-box) and runs as a VPN via `NetworkExtension` (PacketTunnel).
+### iOS Notes
 
-1. Download `HiddifyCore.xcframework` from [hiddify-core releases](https://github.com/hiddify/hiddify-core/releases) (choose the iOS build).
+- Default PacketTunnel path in this package is sing-box via `Libbox.xcframework`.
+- iOS Xray requires custom PacketTunnel integration with `LibXray.xcframework`.
+- Minimum version: iOS 15.0+.
 
-2. Place it in your app's `ios/Frameworks/` directory:
+### macOS Notes
 
-```
-your_app/
-└── ios/
-    └── Frameworks/
-        └── HiddifyCore.xcframework/
-            ├── Info.plist
-            ├── ios-arm64/
-            │   └── HiddifyCore.framework/
-            └── ios-arm64_x86_64-simulator/
-                └── HiddifyCore.framework/
-```
-
-3. Add a **PacketTunnel** Network Extension target to your Xcode project:
-   - Open `ios/Runner.xcworkspace` in Xcode
-   - File → New → Target → Network Extension → Packet Tunnel Provider
-   - Set the bundle identifier to `$(MAIN_BUNDLE_ID).PacketTunnel`
-   - Add the HiddifyCore framework to this target
-
-4. Create an App Group (e.g. `group.com.example.yourApp`) and enable it for both the main app and the PacketTunnel extension.
-
-5. Add to your `Info.plist` (or `Runner.entitlements`):
-   - `com.apple.developer.networking.networkextension` capability
-   - App Groups capability
-
-**Requirements:** iOS 15.0+, Xcode 14+
-
-### iOS — Xray-core
-
-Xray-core support on iOS requires a compatible iOS framework (e.g., [libXray](https://github.com/nickolasgasworking/libXray)). The plugin generates Xray-compatible JSON configuration. To use Xray on iOS:
-
-1. Download or build a libXray `.xcframework` for iOS
-2. Place it in your app's `ios/Frameworks/` directory
-3. Update your PacketTunnel extension to use the Xray framework for starting/stopping the tunnel
-4. Set core engine to `xray`:
-
-```dart
-await v2rayBox.setCoreEngine('xray');
-```
-
-> **Note:** The iOS plugin generates Xray-format JSON configs and passes the `CoreEngine` parameter to the PacketTunnel extension. You need to handle the actual Xray framework integration in your PacketTunnel provider.
-
-### macOS — sing-box
-
-macOS uses sing-box as a **CLI binary** (subprocess) and configures the system proxy automatically.
-
-1. Download the macOS sing-box binary from [sing-box releases](https://github.com/SagerNet/sing-box/releases):
-
-| Architecture | Download file |
-|---|---|
-| Apple Silicon (M1/M2/M3) | `sing-box-*-darwin-arm64.tar.gz` |
-| Intel x86_64 | `sing-box-*-darwin-amd64.tar.gz` |
-| Universal | Use the one matching your development/target Mac |
-
-2. Extract the `.tar.gz` file. Inside you will find a binary named `sing-box`.
-
-3. Place the binary in your app's `macos/Frameworks/` directory:
-
-```
-your_app/
-└── macos/
-    └── Frameworks/
-        └── sing-box          ← the extracted binary
-```
-
-4. Make sure it's executable:
-
-```bash
-chmod +x macos/Frameworks/sing-box
-```
-
-5. The binary needs to be bundled with your app. In Xcode, add it to the "Copy Files" build phase targeting `Frameworks`.
-
-### macOS — Xray-core
-
-1. Download the macOS Xray binary from [Xray-core releases](https://github.com/XTLS/Xray-core/releases):
-
-| Architecture | Download file |
-|---|---|
-| Apple Silicon (M1/M2/M3) | `Xray-macos-arm64-v8a.zip` |
-| Intel x86_64 | `Xray-macos-64.zip` |
-
-2. Extract the `.zip` file. Inside you will find a binary named `xray`.
-
-3. Place the binary in your app's `macos/Frameworks/` directory:
-
-```
-your_app/
-└── macos/
-    └── Frameworks/
-        ├── sing-box         ← (optional, if using sing-box too)
-        └── xray             ← the extracted binary
-```
-
-4. Make sure it's executable:
-
-```bash
-chmod +x macos/Frameworks/xray
-```
-
-5. Set core engine to `xray`:
-
-```dart
-await v2rayBox.setCoreEngine('xray');
-```
-
-**Requirements:** macOS 10.15+
+- Place `xray` and/or `sing-box` under `macos/Frameworks/`.
+- Ensure executability (`chmod +x`).
+- Minimum version: macOS 10.15+.
 
 ## Usage
 
@@ -430,7 +295,7 @@ await v2rayBox.resetTotalTraffic();
 | | Android | iOS | macOS |
 |---|---------|-----|-------|
 | **Xray-core integration** | AAR library (in-process) | xcframework (via PacketTunnel) | CLI binary (subprocess) |
-| **sing-box integration** | CLI binary (subprocess) | HiddifyCore xcframework (via PacketTunnel) | CLI binary (subprocess) |
+| **sing-box integration** | CLI binary (subprocess) | Libbox.xcframework (via PacketTunnel) | CLI binary (subprocess) |
 | **VPN Mode** | Android VpnService + TUN | NetworkExtension PacketTunnel | N/A (proxy mode only) |
 | **Proxy Mode** | SOCKS/HTTP local proxy | N/A (VPN mode only) | System proxy via `networksetup` |
 | **Traffic Stats** | Xray stats API / Clash API | Clash API / PacketTunnel IPC | Clash API (sing-box) |
@@ -452,7 +317,7 @@ On iOS, the VPN runs as a PacketTunnel Network Extension:
 
 1. The main app generates the config JSON (sing-box or Xray format) and passes it to the PacketTunnel extension
 2. The PacketTunnel extension receives the config + core engine type via VPN tunnel options
-3. The extension uses the appropriate framework (HiddifyCore for sing-box, libXray for Xray) to start the tunnel
+3. The extension uses `Libbox.xcframework` for sing-box. For Xray, you need custom `LibXray.xcframework` integration in PacketTunnel.
 4. All device traffic is routed through the tunnel interface
 
 ### How macOS Proxy Works
@@ -584,12 +449,12 @@ On macOS, both cores run as CLI binaries (subprocesses):
 If you want a smaller app, you can ship only one of the two cores on any platform:
 
 **Android:**
-- **Xray-core only** — Don't place `libsingbox.so` in `jniLibs/`. Only include `libv2ray.aar`.
-- **sing-box only** — Don't include `libv2ray.aar` in `libs/`. Only place `libsingbox.so` in `jniLibs/`.
+- **Xray-core only** — Keep only `android/app/libs/libxray.aar` and remove `libsingbox.so` from `jniLibs/`.
+- **sing-box only** — Keep only `libsingbox.so` in `jniLibs/` and remove `android/app/libs/libxray.aar`.
 
 **iOS:**
-- **sing-box only** — Only include `HiddifyCore.xcframework`. No Xray framework needed.
-- **Xray-core only** — Only include the Xray framework. Remove HiddifyCore.
+- **sing-box only** — Only include `Libbox.xcframework`.
+- **Xray-core only** — Use a custom PacketTunnel path with `LibXray.xcframework`.
 
 **macOS:**
 - Only place the binary you need (`sing-box` or `xray`) in `macos/Frameworks/`.
@@ -605,4 +470,4 @@ await v2rayBox.setCoreEngine('singbox');
 
 - [Xray-core](https://github.com/XTLS/Xray-core)
 - [sing-box](https://github.com/SagerNet/sing-box)
-- [AndroidLibXrayLite](https://github.com/2dust/AndroidLibXrayLite/releases)
+- [libXray](https://github.com/XTLS/libXray)

@@ -1,3 +1,12 @@
+## 1.0.6 - 2026-02-25
+
+* Android: migrated Xray Android core flow from 2dust `libv2ray.aar` path to `XTLS/libXray` (`libxray.aar`) build pipeline.
+* Android: added script-based core build workflow for app integrators (`build_android_libxray.sh`, `build_android_libsingbox.sh`).
+* Docs: removed manual core copy instructions from the main README and replaced them with script-first setup instructions.
+* Example tests: fixed `example/test` failure by updating `widget_test.dart` to current app shell behavior.
+* Example integration tests: stabilized `core_engine_smoke_test.dart` by making live VPN smoke optional via `--dart-define=RUN_LIVE_CORE_SMOKE=true`.
+* Android/core integration: additional fixes and refinements across runtime behavior, compatibility parsing, and setup docs.
+
 ## 1.0.5 - 2026-02-24
 
 * Android: aligned service start/stop lifecycle with v2rayNG behavior to reduce first-connect no-traffic states.

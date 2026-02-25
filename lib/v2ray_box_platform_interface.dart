@@ -205,6 +205,11 @@ abstract class V2rayBoxPlatform extends PlatformInterface {
     throw UnimplementedError('getLogs() has not been implemented.');
   }
 
+  /// Clear current log buffer
+  Future<bool> clearLogs() {
+    throw UnimplementedError('clearLogs() has not been implemented.');
+  }
+
   /// Watch live log stream
   Stream<Map<String, dynamic>> watchLogs() {
     throw UnimplementedError('watchLogs() has not been implemented.');

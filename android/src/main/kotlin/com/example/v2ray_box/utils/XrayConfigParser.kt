@@ -2,6 +2,7 @@ package com.example.v2ray_box.utils
 
 import android.net.Uri
 import android.util.Log
+import com.example.v2ray_box.Settings
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import java.net.URLDecoder
@@ -12,8 +13,21 @@ object XrayConfigParser {
     private val gson: Gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
 
     fun buildXrayConfig(link: String, proxyOnly: Boolean = false): String {
-        val outbound = parseLink(link)?.toMutableMap() ?: throw Exception("Invalid or unsupported config link")
-        outbound["mux"] = mapOf("enabled" to false)
+        val outbound = parseLink(link) ?: throw Exception("Invalid or unsupported config link")
+        return buildXrayConfigFromOutbound(outbound, proxyOnly)
+    }
+
+    fun buildXrayConfigFromOutbound(
+        outboundInput: Map<String, Any>,
+        proxyOnly: Boolean = false
+    ): String {
+        val outbound = outboundInput.toMutableMap()
+        if (outbound["tag"] == null || outbound["tag"].toString().isBlank()) {
+            outbound["tag"] = "proxy"
+        }
+        if (!outbound.containsKey("mux")) {
+            outbound["mux"] = mapOf("enabled" to false)
+        }
 
         val socksPort = 10808
         val httpPort = 10809
@@ -33,21 +47,24 @@ object XrayConfigParser {
                     "udp" to true,
                     "userLevel" to XRAY_USER_LEVEL
                 )
-            ),
-            mapOf(
-                "tag" to "http",
-                "port" to httpPort,
-                "listen" to "127.0.0.1",
-                "protocol" to "http",
-                "sniffing" to mapOf(
-                    "enabled" to true,
-                    "destOverride" to listOf("http", "tls")
-                ),
-                "settings" to mapOf<String, Any>()
             )
         )
 
-        if (!proxyOnly) {
+        if (proxyOnly) {
+            inbounds.add(
+                mapOf(
+                    "tag" to "http",
+                    "port" to httpPort,
+                    "listen" to "127.0.0.1",
+                    "protocol" to "http",
+                    "sniffing" to mapOf(
+                        "enabled" to true,
+                        "destOverride" to listOf("http", "tls")
+                    ),
+                    "settings" to mapOf<String, Any>()
+                )
+            )
+        } else {
             inbounds.add(
                 mapOf(
                     "tag" to "tun",
@@ -67,8 +84,7 @@ object XrayConfigParser {
         }
 
         val config = mutableMapOf<String, Any>(
-            "log" to mapOf("loglevel" to "warning"),
-            "stats" to mapOf<String, Any>(),
+            "log" to mapOf("loglevel" to if (Settings.debugMode) "debug" else "warning"),
             "policy" to buildPolicy(),
             "dns" to buildDns(),
             "inbounds" to inbounds,
@@ -92,14 +108,15 @@ object XrayConfigParser {
     }
 
     fun parseLink(link: String): Map<String, Any>? {
+        val rawLink = link.trim()
         return try {
             when {
-                link.startsWith("vless://") -> parseVless(link)
-                link.startsWith("vmess://") -> parseVmess(link)
-                link.startsWith("trojan://") -> parseTrojan(link)
-                link.startsWith("ss://") -> parseShadowsocks(link)
-                link.startsWith("hy2://") || link.startsWith("hysteria2://") -> parseHysteria2(link)
-                link.startsWith("wg://") -> parseWireGuard(link)
+                rawLink.startsWith("vless://", ignoreCase = true) -> parseVless(rawLink)
+                rawLink.startsWith("vmess://", ignoreCase = true) -> parseVmess(rawLink)
+                rawLink.startsWith("trojan://", ignoreCase = true) -> parseTrojan(rawLink)
+                rawLink.startsWith("ss://", ignoreCase = true) -> parseShadowsocks(rawLink)
+                rawLink.startsWith("wg://", ignoreCase = true) ||
+                    rawLink.startsWith("wireguard://", ignoreCase = true) -> parseWireGuard(rawLink)
                 else -> null
             }
         } catch (e: Exception) {
@@ -154,6 +171,11 @@ object XrayConfigParser {
 
     private fun getParam(params: Map<String, String>, key: String): String? {
         return params[key]?.trim()?.takeIf { it.isNotEmpty() }
+            ?: params[key.lowercase()]?.trim()?.takeIf { it.isNotEmpty() }
+            ?: params.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
+                ?.value
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
     }
 
     private fun isDomainLike(value: String?): Boolean {
@@ -169,6 +191,21 @@ object XrayConfigParser {
         }
     }
 
+    private fun resolveSecurity(params: Map<String, String>, vmessJson: Map<*, *>? = null): String? {
+        val explicit = getParam(params, "security")?.lowercase()
+        if (!explicit.isNullOrBlank()) {
+            return if (explicit == "none") null else explicit
+        }
+        if (vmessJson?.get("tls")?.toString() == "tls") return "tls"
+        if (!getParam(params, "pbk").isNullOrBlank() || !getParam(params, "sid").isNullOrBlank()) {
+            return "reality"
+        }
+        val hasTlsHints = listOf(
+            "sni", "peer", "alpn", "fp", "fingerprint", "allowInsecure", "insecure"
+        ).any { !getParam(params, it).isNullOrBlank() }
+        return if (hasTlsHints) "tls" else null
+    }
+
     private fun buildStreamSettings(
         params: Map<String, String>,
         vmessJson: Map<*, *>? = null,
@@ -180,12 +217,15 @@ object XrayConfigParser {
         val networkType = when (networkTypeRaw.lowercase()) {
             "websocket" -> "ws"
             "mkcp" -> "kcp"
+            "http2" -> "h2"
+            "http-upgrade" -> "httpupgrade"
+            "split-http" -> "xhttp"
             else -> networkTypeRaw.lowercase()
         }
         stream["network"] = networkType
 
-        val security = getParam(params, "security")
-            ?: if (vmessJson?.get("tls")?.toString() == "tls") "tls" else "none"
+        val resolvedSecurity = resolveSecurity(params, vmessJson)
+        val security = resolvedSecurity ?: "none"
         stream["security"] = security
 
         when (networkType) {
@@ -257,8 +297,6 @@ object XrayConfigParser {
                     grpcSettings["authority"] = it
                     transportSniCandidate = it
                 }
-                grpcSettings["idle_timeout"] = 60
-                grpcSettings["health_check_timeout"] = 20
                 stream["grpcSettings"] = grpcSettings
             }
             "h2", "http" -> {
@@ -286,17 +324,17 @@ object XrayConfigParser {
                 stream["httpupgradeSettings"] = huSettings
             }
             "splithttp", "xhttp" -> {
-                val shSettings = mutableMapOf<String, Any>()
+                val xhttpSettings = mutableMapOf<String, Any>()
                 val path = getParam(params, "path") ?: vmessJson?.get("path")?.toString()
-                if (!path.isNullOrEmpty()) shSettings["path"] = path
+                if (!path.isNullOrEmpty()) xhttpSettings["path"] = path
                 val host = getParam(params, "host") ?: vmessJson?.get("host")?.toString()
                 if (!host.isNullOrEmpty()) {
-                    shSettings["host"] = host
+                    xhttpSettings["host"] = host
                     transportSniCandidate = host
                 }
-                getParam(params, "mode")?.let { shSettings["mode"] = it }
-                stream["splithttpSettings"] = shSettings
-                stream["network"] = "splithttp"
+                getParam(params, "mode")?.let { xhttpSettings["mode"] = it }
+                stream["xhttpSettings"] = xhttpSettings
+                stream["network"] = "xhttp"
             }
             "quic" -> {
                 val quicSettings = mutableMapOf<String, Any>(
@@ -512,6 +550,18 @@ object XrayConfigParser {
 
         val queryIndex = linkPart.indexOf("?")
         val mainPart = if (queryIndex > 0) linkPart.substring(0, queryIndex) else linkPart
+        val queryString = if (queryIndex > 0) linkPart.substring(queryIndex + 1) else ""
+
+        val params = mutableMapOf<String, String>()
+        queryString.split("&")
+            .filter { it.isNotBlank() }
+            .forEach { pair ->
+                val kv = pair.split("=", limit = 2)
+                val key = kv[0].trim()
+                if (key.isEmpty()) return@forEach
+                val value = if (kv.size > 1) URLDecoder.decode(kv[1], "UTF-8") else ""
+                params[key] = value
+            }
 
         val atIndex = mainPart.lastIndexOf("@")
         val (method, password, server, port) = if (atIndex > 0) {
@@ -555,6 +605,47 @@ object XrayConfigParser {
             listOf(m, p, s, pt.toString())
         }
 
+        val streamSettings = mutableMapOf<String, Any>(
+            "network" to "tcp",
+            "tcpSettings" to mapOf("header" to mapOf("type" to "none"))
+        )
+
+        val pluginValue = params["plugin"]?.lowercase()
+        if (!pluginValue.isNullOrBlank() && pluginValue.contains("obfs=http")) {
+            val pluginOptions = mutableMapOf<String, String>()
+            pluginValue.split(";")
+                .filter { it.contains("=") }
+                .forEach { item ->
+                    val kv = item.split("=", limit = 2)
+                    pluginOptions[kv[0].trim()] = kv[1].trim()
+                }
+
+            val host = pluginOptions["obfs-host"]?.takeIf { it.isNotBlank() }
+            val path = pluginOptions["path"]?.takeIf { it.isNotBlank() } ?: "/"
+            val requestHeaders = mutableMapOf<String, Any>(
+                "User-Agent" to listOf(
+                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"
+                ),
+                "Accept-Encoding" to listOf("gzip, deflate"),
+                "Connection" to listOf("keep-alive"),
+                "Pragma" to "no-cache"
+            )
+            if (!host.isNullOrBlank()) {
+                requestHeaders["Host"] = host.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            }
+            streamSettings["tcpSettings"] = mapOf(
+                "header" to mapOf(
+                    "type" to "http",
+                    "request" to mapOf(
+                        "version" to "1.1",
+                        "method" to "GET",
+                        "path" to listOf(path),
+                        "headers" to requestHeaders
+                    )
+                )
+            )
+        }
+
         val outbound = mutableMapOf<String, Any>(
             "tag" to "proxy",
             "protocol" to "shadowsocks",
@@ -569,10 +660,7 @@ object XrayConfigParser {
                     )
                 )
             ),
-            "streamSettings" to mapOf(
-                "network" to "tcp",
-                "tcpSettings" to mapOf("header" to mapOf("type" to "none"))
-            )
+            "streamSettings" to streamSettings
         )
 
         return outbound
@@ -586,20 +674,37 @@ object XrayConfigParser {
         val port = uri.port.takeIf { it > 0 } ?: 443
         val params = parseQueryParams(uri)
 
-        val serverObj = mutableMapOf<String, Any>(
+        val settings = mutableMapOf<String, Any>(
             "address" to server,
             "port" to port,
-            "password" to auth,
-            "level" to XRAY_USER_LEVEL
+            "version" to 2
         )
 
         val outbound = mutableMapOf<String, Any>(
             "tag" to "proxy",
-            "protocol" to "hysteria2",
-            "settings" to mapOf("servers" to listOf(serverObj))
+            "protocol" to "hysteria",
+            "settings" to settings
         )
 
-        val stream = mutableMapOf<String, Any>("network" to "tcp", "security" to "tls")
+        val stream = mutableMapOf<String, Any>(
+            "network" to "hysteria",
+            "security" to "tls"
+        )
+        val hysteriaSettings = mutableMapOf<String, Any>("version" to 2)
+        if (auth.isNotBlank()) hysteriaSettings["auth"] = auth
+        getParam(params, "upmbps")?.let { hysteriaSettings["up"] = "${it} Mbps" }
+        getParam(params, "downmbps")?.let { hysteriaSettings["down"] = "${it} Mbps" }
+        getParam(params, "mport")?.let { ports ->
+            val hop = mutableMapOf<String, Any>("port" to ports)
+            getParam(params, "mportHopInt")?.toIntOrNull()?.let { interval ->
+                if (interval >= 5) {
+                    hop["interval"] = interval
+                }
+            }
+            hysteriaSettings["udphop"] = hop
+        }
+        stream["hysteriaSettings"] = hysteriaSettings
+
         val tlsSettings = mutableMapOf<String, Any>()
         (getParam(params, "sni") ?: server.takeIf { isDomainLike(it) })?.let { tlsSettings["serverName"] = it }
         parseFlexibleBool(getParam(params, "allowInsecure") ?: getParam(params, "insecure"))?.let {

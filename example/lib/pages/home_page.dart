@@ -458,10 +458,26 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _toggleConnection() async {
-    if (_status == VpnStatus.starting || _status == VpnStatus.stopping) return;
-    await _refreshRuntimeState();
+    final runtimeMode = await widget.v2rayBox.getServiceMode();
+    final runtimeCore = await widget.v2rayBox.getCoreEngine();
+    if (mounted && (runtimeMode != _mode || runtimeCore != _coreEngine)) {
+      setState(() {
+        _mode = runtimeMode;
+        _coreEngine = runtimeCore;
+      });
+    } else {
+      _mode = runtimeMode;
+      _coreEngine = runtimeCore;
+    }
 
-    if (_status == VpnStatus.started) {
+    if (_status == VpnStatus.stopping) {
+      return;
+    }
+
+    if (_status == VpnStatus.started || _status == VpnStatus.starting) {
+      if (mounted) {
+        setState(() => _status = VpnStatus.stopping);
+      }
       await widget.v2rayBox.disconnect();
     } else {
       if (_selectedConfig == null) {
@@ -469,11 +485,17 @@ class _HomePageState extends State<HomePage>
         return;
       }
       try {
-        if (_mode == VpnMode.vpn) {
+        if (mounted) {
+          setState(() => _status = VpnStatus.starting);
+        }
+        if (runtimeMode == VpnMode.vpn) {
           final has = await widget.v2rayBox.checkVpnPermission();
           if (!has) {
             final granted = await widget.v2rayBox.requestVpnPermission();
             if (!granted) {
+              if (mounted) {
+                setState(() => _status = VpnStatus.stopped);
+              }
               _snack('VPN permission required');
               return;
             }
@@ -481,6 +503,9 @@ class _HomePageState extends State<HomePage>
         }
         final err = await widget.v2rayBox.parseConfig(_selectedConfig!.link);
         if (err.isNotEmpty) {
+          if (mounted) {
+            setState(() => _status = VpnStatus.stopped);
+          }
           _snack('Config error: $err');
           return;
         }
@@ -489,6 +514,9 @@ class _HomePageState extends State<HomePage>
           name: _selectedConfig!.name,
         );
       } catch (e) {
+        if (mounted) {
+          setState(() => _status = VpnStatus.stopped);
+        }
         _snack('Connection failed: $e');
       }
     }
@@ -1428,11 +1456,17 @@ class _ConfigTile extends StatelessWidget {
       case 'ss':
         return const Color(0xFF2ED573);
       case 'hysteria2':
+      case 'hy2':
+      case 'hysteria':
+      case 'hy':
         return const Color(0xFFE84393);
       case 'tuic':
         return const Color(0xFFFD79A8);
       case 'wireguard':
+      case 'wg':
         return const Color(0xFF00B894);
+      case 'ssh':
+        return const Color(0xFF74B9FF);
       default:
         return Colors.grey;
     }

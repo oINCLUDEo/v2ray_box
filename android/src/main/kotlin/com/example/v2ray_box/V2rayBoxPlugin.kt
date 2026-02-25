@@ -31,8 +31,10 @@ import com.example.v2ray_box.constant.ServiceMode
 import com.example.v2ray_box.constant.Status
 import com.example.v2ray_box.utils.CommandClient
 import com.example.v2ray_box.utils.ConfigParser
+import com.example.v2ray_box.utils.CoreCompatibility
 import com.example.v2ray_box.utils.SingboxProcess
 import com.example.v2ray_box.utils.XrayConfigParser
+import com.example.v2ray_box.xray.XrayBridge
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.annotations.SerializedName
@@ -53,10 +55,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import libv2ray.Libv2ray
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.ServerSocket
+import java.net.URL
+import java.net.URLEncoder
 import java.util.LinkedList
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -81,6 +85,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private var scope: CoroutineScope = GlobalScope
 
     private val logList = LinkedList<String>()
+    private val logListLock = Any()
     val serviceStatus = MutableLiveData(Status.Stopped)
     val serviceAlerts = MutableLiveData<ServiceEvent?>(null)
 
@@ -94,6 +99,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private var logsCommandClient: CommandClient? = null
     private val pingSessionId = AtomicLong(0L)
     private val pingExecutors = Collections.newSetFromMap(ConcurrentHashMap<ExecutorService, Boolean>())
+    private val serviceActionToken = AtomicLong(0L)
     private var componentCallbacksRegistered = false
     private var activityCallbacksRegistered = false
     private var startedActivityCount = 0
@@ -137,6 +143,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private const val DEFAULT_PING_TIMEOUT_MS = 7000
         private const val MIN_PING_TIMEOUT_MS = 1000
         private const val MAX_PING_TIMEOUT_MS = 30000
+        private const val MAX_LOG_LINES = 300
         private const val PING_TASK_GRACE_MS = 1200L
         private const val PING_MAX_PARALLEL_TASKS = 4
         private const val PING_EXECUTOR_DRAIN_WAIT_MS = 200L
@@ -373,10 +380,12 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     override fun onServiceWriteLog(message: String?) {
         if (message != null) {
-            if (logList.size > 300) {
-                logList.removeFirst()
+            synchronized(logListLock) {
+                if (logList.size >= MAX_LOG_LINES) {
+                    logList.removeFirst()
+                }
+                logList.addLast(message)
             }
-            logList.addLast(message)
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 logsEventSink?.success(mapOf("message" to message))
             }
@@ -384,18 +393,36 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onServiceResetLogs(messages: MutableList<String>) {
-        logList.clear()
-        logList.addAll(messages)
+        synchronized(logListLock) {
+            logList.clear()
+            messages.forEach { msg ->
+                if (logList.size >= MAX_LOG_LINES) {
+                    logList.removeFirst()
+                }
+                logList.addLast(msg)
+            }
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            logsEventSink?.success(mapOf("cleared" to true))
+        }
     }
 
     override fun clearLog() {
-        logList.clear()
+        synchronized(logListLock) {
+            logList.clear()
+        }
     }
 
     override fun appendLogs(messages: List<String>) {
+        synchronized(logListLock) {
+            for (msg in messages) {
+                if (logList.size >= MAX_LOG_LINES) {
+                    logList.removeFirst()
+                }
+                logList.addLast(msg)
+            }
+        }
         for (msg in messages) {
-            if (logList.size > 300) logList.removeFirst()
-            logList.addLast(msg)
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 logsEventSink?.success(mapOf("message" to msg))
             }
@@ -416,7 +443,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val workingDir = context.getExternalFilesDir(null) ?: context.filesDir
                         workingDir.mkdirs()
                         runCatching {
-                            Libv2ray.initCoreEnv(workingDir.path, "")
+                            XrayBridge.initCoreEnv(context, workingDir.path)
                         }
                         success("")
                     }
@@ -433,7 +460,8 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val args = call.arguments as Map<*, *>
                         val configLink = args["link"] as String
                         val debug = args["debug"] as? Boolean ?: false
-                        val msg = BoxService.parseConfig(context, configLink, debug)
+                        val runtimeEngine = CoreCompatibility.resolveEngineForLink(Settings.coreEngine, configLink)
+                        val msg = BoxService.parseConfig(context, configLink, debug, runtimeEngine)
                         success(msg)
                     }
                 }
@@ -462,7 +490,8 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             error("blank properties", "blank properties", null)
                             return@runCatching
                         }
-                        val config = BoxService.buildConfig(context, configLink)
+                        val runtimeEngine = CoreCompatibility.resolveEngineForLink(Settings.coreEngine, configLink)
+                        val config = BoxService.buildConfig(context, configLink, runtimeEngine)
                         success(config)
                     }
                 }
@@ -471,6 +500,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "start" -> {
                 scope.launch(Dispatchers.IO) {
                     result.runCatching {
+                        val actionToken = nextServiceActionToken()
                         val context = applicationContext ?: run {
                             error("no_context", "Application context not available", null)
                             return@runCatching
@@ -478,15 +508,28 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val args = call.arguments as Map<*, *>
                         val configLink = args["link"] as String? ?: ""
 
-                        val configPath = BoxService.writeConfigFile(context, configLink)
+                        val runtimeEngine = CoreCompatibility.resolveEngineForLink(Settings.coreEngine, configLink)
+                        Settings.activeRuntimeEngine = runtimeEngine
+                        val configPath = BoxService.writeConfigFile(context, configLink, runtimeEngine)
                         Settings.activeConfigPath = configPath
                         Settings.activeProfileName = args["name"] as String? ?: ""
+
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "start cancelled before service launch")
+                            success(true)
+                            return@runCatching
+                        }
 
                         if (isServiceActive()) {
                             Log.w(TAG, "start requested while service is active, restarting service")
                             BoxService.stop(context)
                             waitForServiceStopped()
                             delay(SERVICE_RESTART_SETTLE_MS)
+                        }
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "start cancelled after stop/wait")
+                            success(true)
+                            return@runCatching
                         }
                         startService()
                         success(true)
@@ -530,14 +573,21 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "stop" -> {
                 scope.launch {
                     result.runCatching {
+                        invalidatePendingServiceActions("stop requested")
                         cancelActivePing("vpn stop requested")
-                        val started = serviceStatus.value == Status.Started
-                        if (!started) {
-                            Log.w(TAG, "service is not running")
-                            success(true)
-                            return@runCatching
+                        val context = applicationContext
+                        if (context != null) {
+                            // Force-stop pending/starting service instance, then send close broadcast.
+                            runCatching {
+                                context.stopService(Intent(context, Settings.serviceClass()))
+                            }
+                            BoxService.stop(context)
+                        } else {
+                            Log.w(TAG, "application context is null while stopping service")
                         }
-                        applicationContext?.let { BoxService.stop(it) }
+                        if (!isServiceActive()) {
+                            Log.w(TAG, "service is not running")
+                        }
                         success(true)
                     }
                 }
@@ -546,6 +596,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "restart" -> {
                 scope.launch(Dispatchers.IO) {
                     result.runCatching {
+                        val actionToken = nextServiceActionToken()
                         val context = applicationContext ?: run {
                             error("no_context", "Application context not available", null)
                             return@runCatching
@@ -553,9 +604,17 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val args = call.arguments as Map<*, *>
                         val configLink = args["link"] as String? ?: ""
 
-                        val configPath = BoxService.writeConfigFile(context, configLink)
+                        val runtimeEngine = CoreCompatibility.resolveEngineForLink(Settings.coreEngine, configLink)
+                        Settings.activeRuntimeEngine = runtimeEngine
+                        val configPath = BoxService.writeConfigFile(context, configLink, runtimeEngine)
                         Settings.activeConfigPath = configPath
                         Settings.activeProfileName = args["name"] as String? ?: ""
+
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "restart cancelled before service check")
+                            success(true)
+                            return@runCatching
+                        }
 
                         val started = serviceStatus.value == Status.Started
                         if (!started) {
@@ -569,6 +628,11 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         BoxService.stop(context)
                         waitForServiceStopped()
                         delay(SERVICE_RESTART_SETTLE_MS)
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "restart cancelled after stop/wait")
+                            success(true)
+                            return@runCatching
+                        }
                         startService()
                         success(true)
                     }
@@ -740,22 +804,36 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     result.runCatching {
                         val engine = Settings.coreEngine
                         val info = mutableMapOf<String, Any>(
-                            "core" to engine
+                            "core" to engine,
+                            "active_runtime_engine" to Settings.effectiveCoreEngine()
                         )
                         if (engine == CoreEngine.SINGBOX) {
                             info["engine"] = "sing-box"
+                            info["version_source"] = "libsingbox.so"
                             try {
                                 val ctx = applicationContext
                                 if (ctx != null) {
-                                    val ver = SingboxProcess.getVersion(ctx)
-                                    if (ver.isNotEmpty()) info["version"] = ver
+                                    val rawVersion = SingboxProcess.getVersion(ctx)
+                                    if (rawVersion.isNotEmpty()) {
+                                        info["version_raw"] = rawVersion
+                                        info["version"] = normalizeSingboxVersion(rawVersion)
+                                    }
                                 }
                             } catch (_: Exception) {}
                         } else {
                             info["engine"] = "xray-core"
                             try {
-                                val version = Libv2ray.checkVersionX()
-                                if (!version.isNullOrEmpty()) info["version"] = version
+                                val ctx = applicationContext
+                                if (ctx != null) {
+                                    val workDir = (ctx.getExternalFilesDir(null) ?: ctx.filesDir).absolutePath
+                                    XrayBridge.initCoreEnv(ctx, workDir)
+                                }
+                                val rawVersion = XrayBridge.checkVersion().trim()
+                                if (rawVersion.isNotEmpty()) {
+                                    info["version_raw"] = rawVersion
+                                    info["version"] = normalizeXrayVersion(rawVersion)
+                                }
+                                info["version_source"] = "libxray.aar"
                             } catch (_: Exception) {}
                         }
                         success(info)
@@ -780,6 +858,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             return@runCatching
                         }
 
+                        invalidatePendingServiceActions("core switch requested")
                         cancelActivePing("core switch requested")
                         if (isServiceActive()) {
                             Log.d(TAG, "Stopping service before switching core to $engine")
@@ -793,6 +872,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         }
                         CommandClient.activeCoreController = null
                         Settings.coreEngine = engine
+                        Settings.activeRuntimeEngine = ""
                         success(true)
                     }
                 }
@@ -819,6 +899,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             "start_with_json" -> {
                 scope.launch(Dispatchers.IO) {
                     result.runCatching {
+                        val actionToken = nextServiceActionToken()
                         val context = applicationContext ?: run {
                             error("no_context", "Application context not available", null)
                             return@runCatching
@@ -837,12 +918,24 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         val configPath = BoxService.writeJsonConfigFile(context, configJson)
                         Settings.activeConfigPath = configPath
                         Settings.activeProfileName = name
+                        Settings.activeRuntimeEngine = Settings.coreEngine
+
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "start_with_json cancelled before service launch")
+                            success(true)
+                            return@runCatching
+                        }
 
                         if (isServiceActive()) {
                             Log.w(TAG, "start_with_json requested while service is active, restarting service")
                             BoxService.stop(context)
                             waitForServiceStopped()
                             delay(SERVICE_RESTART_SETTLE_MS)
+                        }
+                        if (!isServiceActionCurrent(actionToken)) {
+                            Log.d(TAG, "start_with_json cancelled after stop/wait")
+                            success(true)
+                            return@runCatching
                         }
                         startService()
                         success(true)
@@ -851,7 +944,20 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
 
             "get_logs" -> {
-                result.success(logList.toList())
+                val snapshot = synchronized(logListLock) {
+                    logList.toList()
+                }
+                result.success(snapshot)
+            }
+
+            "clear_logs" -> {
+                synchronized(logListLock) {
+                    logList.clear()
+                }
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    logsEventSink?.success(mapOf("cleared" to true))
+                }
+                result.success(true)
             }
 
             "set_debug_mode" -> {
@@ -945,19 +1051,58 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
 
             "select_outbound" -> {
-                result.success(true)
+                scope.launch(Dispatchers.IO) {
+                    result.runCatching {
+                        val args = call.arguments as Map<*, *>
+                        val groupTag = args["groupTag"] as? String ?: ""
+                        val outboundTag = args["outboundTag"] as? String ?: ""
+                        if (groupTag.isBlank() || outboundTag.isBlank()) {
+                            success(false)
+                            return@runCatching
+                        }
+                        if (Settings.effectiveCoreEngine() != CoreEngine.SINGBOX) {
+                            success(true)
+                            return@runCatching
+                        }
+                        val encodedGroup = URLEncoder.encode(groupTag, Charsets.UTF_8.name())
+                        val ok = callSingboxClashApi(
+                            path = "/proxies/$encodedGroup",
+                            method = "PUT",
+                            jsonBody = gson.toJson(mapOf("name" to outboundTag))
+                        )
+                        success(ok)
+                    }
+                }
             }
 
             "set_clash_mode" -> {
-                result.success(true)
+                scope.launch(Dispatchers.IO) {
+                    result.runCatching {
+                        val mode = (call.arguments as? String)?.trim()?.lowercase().orEmpty()
+                        if (mode !in setOf("rule", "global", "direct")) {
+                            success(false)
+                            return@runCatching
+                        }
+                        if (Settings.effectiveCoreEngine() != CoreEngine.SINGBOX) {
+                            success(true)
+                            return@runCatching
+                        }
+                        val ok = callSingboxClashApi(
+                            path = "/configs",
+                            method = "PATCH",
+                            jsonBody = gson.toJson(mapOf("mode" to mode))
+                        )
+                        success(ok)
+                    }
+                }
             }
 
             "parse_subscription" -> {
-                result.error("NOT_SUPPORTED", "Subscription parsing not supported with Xray core", null)
+                result.error("NOT_SUPPORTED", "Subscription parsing is not implemented on Android core bridge", null)
             }
 
             "generate_subscription_link" -> {
-                result.error("NOT_SUPPORTED", "Subscription link generation not supported with Xray core", null)
+                result.error("NOT_SUPPORTED", "Subscription link generation is not implemented on Android core bridge", null)
             }
 
             "set_locale" -> {
@@ -1064,6 +1209,15 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return current == Status.Started || current == Status.Starting || current == Status.Stopping
     }
 
+    private fun nextServiceActionToken(): Long = serviceActionToken.incrementAndGet()
+
+    private fun invalidatePendingServiceActions(reason: String) {
+        val token = serviceActionToken.incrementAndGet()
+        Log.d(TAG, "Service action token invalidated ($reason), token=$token")
+    }
+
+    private fun isServiceActionCurrent(token: Long): Boolean = serviceActionToken.get() == token
+
     private suspend fun waitForServiceStopped(timeoutMs: Long = 6000L): Boolean {
         val startedAt = System.currentTimeMillis()
         while (System.currentTimeMillis() - startedAt < timeoutMs) {
@@ -1132,16 +1286,27 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     private fun testConfigLink(link: String, timeout: Int, sessionId: Long): Long {
         if (!isPingSessionActive(sessionId)) return -1L
-        val outbound = XrayConfigParser.parseLink(link) ?: run {
+        val outbound = parseOutboundForPing(link) ?: run {
             Log.e(TAG, "Ping: failed to parse config link")
             return -1L
         }
         if (!isPingSessionActive(sessionId)) return -1L
         ensureCoreEnvInitializedForPing()
-        val config = buildPingMeasureConfig(outbound)
-        val measured = measureOutboundDelayWithTimeout(config, Settings.pingTestUrl, timeout, sessionId)
+        val socksPort = allocatePingSocksPort()
+        val config = buildPingMeasureConfig(outbound, socksPort)
+        val measured = measureOutboundDelayWithTimeout(
+            config,
+            Settings.pingTestUrl,
+            timeout,
+            sessionId,
+            "socks5://127.0.0.1:$socksPort"
+        )
         if (!isPingSessionActive(sessionId)) return -1L
         val normalized = normalizeDelayValue(measured)
+        Log.d(
+            TAG,
+            "Ping single result normalized=$normalized raw=$measured link=${link.take(120)}"
+        )
         if (normalized >= 0L) {
             Log.d(TAG, "Ping OK: ${normalized}ms")
         } else {
@@ -1166,7 +1331,7 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             if (!isPingSessionActive(sessionId)) {
                 return@forEach
             }
-            val outbound = XrayConfigParser.parseLink(link)
+            val outbound = parseOutboundForPing(link)
             if (outbound != null) {
                 parsed.add(ParsedEntry(link, outbound))
             } else {
@@ -1203,18 +1368,24 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             results.putIfAbsent(entry.link, -1L)
                             return@submit
                         }
-                        val config = buildPingMeasureConfig(entry.outbound)
+                        val socksPort = allocatePingSocksPort()
+                        val config = buildPingMeasureConfig(entry.outbound, socksPort)
                         val measured = measureOutboundDelayWithTimeout(
                             config,
                             Settings.pingTestUrl,
                             effectiveTimeout,
-                            sessionId
+                            sessionId,
+                            "socks5://127.0.0.1:$socksPort"
                         )
                         if (!isPingSessionActive(sessionId)) {
                             results.putIfAbsent(entry.link, -1L)
                             return@submit
                         }
                         val elapsed = normalizeDelayValue(measured)
+                        Log.d(
+                            TAG,
+                            "Ping batch result normalized=$elapsed raw=$measured link=${entry.link.take(120)}"
+                        )
                         results[entry.link] = elapsed
                         mainHandler.post {
                             if (isPingSessionActive(sessionId)) {
@@ -1294,8 +1465,14 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         val workingDir = context.getExternalFilesDir(null) ?: context.filesDir
         workingDir.mkdirs()
         runCatching {
-            Libv2ray.initCoreEnv(workingDir.path, "")
+            XrayBridge.initCoreEnv(context, workingDir.path)
         }
+    }
+
+    private fun parseOutboundForPing(link: String): Map<String, Any>? {
+        val libOutbound = XrayBridge.parseFirstOutboundFromShareLink(link)
+        if (libOutbound != null) return libOutbound
+        return XrayConfigParser.parseLink(link)
     }
 
     private fun parsePingTimeout(value: Any?): Int {
@@ -1303,17 +1480,34 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return timeout.coerceIn(MIN_PING_TIMEOUT_MS, MAX_PING_TIMEOUT_MS)
     }
 
+    private fun normalizeXrayVersion(raw: String): String {
+        val match = Regex("""(\d+\.\d+\.\d+(?:\.\d+)?)""").find(raw)
+        return match?.value ?: raw
+    }
+
+    private fun normalizeSingboxVersion(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return trimmed
+        val semverMatch = Regex("""(?:v)?(\d+\.\d+\.\d+(?:[-+._][0-9A-Za-z.-]+)?)""")
+            .find(trimmed)
+        if (semverMatch != null) {
+            return semverMatch.groupValues[1]
+        }
+        return trimmed.removePrefix("v")
+    }
+
     private fun measureOutboundDelayWithTimeout(
         configJson: String,
         testUrl: String,
         timeoutMs: Int,
-        sessionId: Long
+        sessionId: Long,
+        proxyUrl: String
     ): Long {
         if (!isPingSessionActive(sessionId)) return -1L
         val executor = newPingExecutor(1, "v2ray-ping-single")
         registerPingExecutor(executor)
         val future = executor.submit<Long> {
-            measureOutboundDelay(configJson, testUrl)
+            measureOutboundDelay(configJson, testUrl, timeoutMs, proxyUrl)
         }
         return try {
             future.get(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -1333,9 +1527,14 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
     }
 
-    private fun measureOutboundDelay(configJson: String, testUrl: String): Long {
+    private fun measureOutboundDelay(
+        configJson: String,
+        testUrl: String,
+        timeoutMs: Int,
+        proxyUrl: String
+    ): Long {
         return try {
-            Libv2ray.measureOutboundDelay(configJson, testUrl)
+            XrayBridge.measureOutboundDelay(configJson, testUrl, timeoutMs, proxyUrl)
         } catch (e: Exception) {
             Log.e(TAG, "measureOutboundDelay failed: ${e.message}")
             -1L
@@ -1343,15 +1542,30 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun normalizeDelayValue(delayMs: Long): Long {
+        // libXray uses these internal sentinels for ping failure/timeout paths.
+        if (delayMs == 10000L || delayMs == 11000L) return -1L
         return if (delayMs <= 0L || delayMs >= 65000L) -1L else delayMs
     }
 
-    private fun buildPingMeasureConfig(outbound: Map<String, Any>): String {
+    private fun buildPingMeasureConfig(outbound: Map<String, Any>, socksPort: Int): String {
         val speedtestOutbound = outbound.toMutableMap().apply {
             remove("mux")
+            put("tag", "proxy")
         }
         val config = mapOf(
-            "log" to mapOf("loglevel" to "warning"),
+            "log" to mapOf("loglevel" to if (Settings.debugMode) "debug" else "warning"),
+            "inbounds" to listOf(
+                mapOf(
+                    "tag" to "socks",
+                    "protocol" to "socks",
+                    "listen" to "127.0.0.1",
+                    "port" to socksPort,
+                    "settings" to mapOf(
+                        "udp" to true,
+                        "auth" to "noauth"
+                    )
+                )
+            ),
             "outbounds" to listOf(
                 speedtestOutbound,
                 mapOf(
@@ -1364,9 +1578,28 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     "protocol" to "blackhole",
                     "settings" to mapOf("response" to mapOf("type" to "http"))
                 )
+            ),
+            "routing" to mapOf(
+                "domainStrategy" to "AsIs",
+                "rules" to listOf(
+                    mapOf(
+                        "type" to "field",
+                        "inboundTag" to listOf("socks"),
+                        "outboundTag" to "proxy"
+                    )
+                )
             )
         )
         return gson.toJson(config)
+    }
+
+    private fun allocatePingSocksPort(): Int {
+        return runCatching {
+            java.net.ServerSocket(0).use { socket ->
+                socket.reuseAddress = true
+                socket.localPort
+            }
+        }.getOrDefault(10808)
     }
 
     private fun formatBytes(bytes: Long): String {
@@ -1377,6 +1610,34 @@ class V2rayBoxPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         if (mb < 1024) return String.format("%.1f MB", mb)
         val gb = mb / 1024.0
         return String.format("%.2f GB", gb)
+    }
+
+    private fun callSingboxClashApi(
+        path: String,
+        method: String,
+        jsonBody: String? = null
+    ): Boolean {
+        return runCatching {
+            val conn = (URL("http://127.0.0.1:9090$path").openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 1500
+                readTimeout = 1500
+                doInput = true
+                if (!jsonBody.isNullOrBlank()) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+            }
+            if (!jsonBody.isNullOrBlank()) {
+                conn.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(jsonBody) }
+            }
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..299
+        }.getOrElse { e ->
+            Log.w(TAG, "Sing-box clash api call failed ($method $path): ${e.message}")
+            false
+        }
     }
 }
 

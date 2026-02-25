@@ -427,6 +427,16 @@ class _SettingsPageState extends State<SettingsPage> {
                         engineName,
                         style: TextStyle(color: Colors.grey[400], fontSize: 13),
                       ),
+                      if (_coreInfo['version_source'] != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          'source: ${_coreInfo['version_source']}',
+                          style: TextStyle(
+                            color: Colors.grey[500],
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

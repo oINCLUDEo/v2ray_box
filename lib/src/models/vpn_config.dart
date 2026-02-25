@@ -88,10 +88,14 @@ class VpnConfig {
       'trojan',
       'ss',
       'ssr',
+      'hy',
+      'hy2',
       'hysteria',
       'hysteria2',
       'tuic',
+      'wg',
       'wireguard',
+      'ssh',
     ];
 
     try {
@@ -116,13 +120,18 @@ class VpnConfig {
       case 'ssr':
         return 'ShadowsocksR';
       case 'hysteria':
+      case 'hy':
         return 'Hysteria';
       case 'hysteria2':
+      case 'hy2':
         return 'Hysteria 2';
       case 'tuic':
         return 'TUIC';
       case 'wireguard':
+      case 'wg':
         return 'WireGuard';
+      case 'ssh':
+        return 'SSH';
       default:
         return protocol.toUpperCase();
     }
@@ -183,4 +192,3 @@ class VpnConfig {
     );
   }
 }
-

@@ -4,7 +4,7 @@
 //
 
 import NetworkExtension
-import HiddifyCore
+import Libbox
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     
@@ -12,6 +12,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var boxService: LibboxBoxService?
     private var platformInterface: TunnelPlatformInterface?
     private var config: String?
+    private var coreEngine: String = "singbox"
     
     private var uploadTotal: Int64 = 0
     private var downloadTotal: Int64 = 0
@@ -23,6 +24,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         
         config = configString
+        coreEngine = (options?["CoreEngine"] as? String ?? "singbox").lowercased()
+        if coreEngine == "xray" {
+            throw NSError(
+                domain: "V2rayBox",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "iOS xray engine is not enabled in default PacketTunnel. Build and integrate XTLS/libXray in your tunnel target first."]
+            )
+        }
         let disableMemoryLimit = (options?["DisableMemoryLimit"] as? String ?? "NO") == "YES"
         
         // Create directories
@@ -401,4 +410,3 @@ private func runBlocking<T>(_ block: @escaping () async -> T) -> T {
     semaphore.wait()
     return value
 }
-

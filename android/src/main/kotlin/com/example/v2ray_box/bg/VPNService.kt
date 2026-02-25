@@ -78,9 +78,7 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         super.onRevoke()
     }
 
-    override fun autoDetectInterfaceControl(fd: Int) {
-        protect(fd)
-    }
+    override fun autoDetectInterfaceControl(fd: Int): Boolean = protect(fd)
 
     private fun addIncludePackage(builder: Builder, packageName: String) {
         if (packageName == this.packageName) {

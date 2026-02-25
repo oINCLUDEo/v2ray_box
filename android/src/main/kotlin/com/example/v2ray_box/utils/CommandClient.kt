@@ -1,17 +1,16 @@
 package com.example.v2ray_box.utils
 
+import android.net.TrafficStats
 import android.util.Log
 import com.example.v2ray_box.Settings
 import com.example.v2ray_box.constant.CoreEngine
+import com.example.v2ray_box.xray.XrayCoreController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import libv2ray.CoreController
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -25,7 +24,7 @@ open class CommandClient(
         private const val TAG = "V2Ray/CommandClient"
         private const val POLL_INTERVAL_MS = 500L
         private const val SINGBOX_API = "http://127.0.0.1:9090"
-        var activeCoreController: CoreController? = null
+        var activeCoreController: XrayCoreController? = null
     }
 
     enum class ConnectionType {
@@ -43,6 +42,8 @@ open class CommandClient(
     private var pollingJob: Job? = null
     private var totalUplink = 0L
     private var totalDownlink = 0L
+    private var xrayLastTxBytes = -1L
+    private var xrayLastRxBytes = -1L
 
     fun connect() {
         disconnect()
@@ -63,7 +64,8 @@ open class CommandClient(
     private fun startStatsPolling() {
         pollingJob = scope.launch(Dispatchers.IO) {
             handler.onConnected()
-            if (Settings.coreEngine == CoreEngine.SINGBOX && SingboxProcess.isRunning) {
+            syncDeviceTrafficSnapshot()
+            if (Settings.effectiveCoreEngine() == CoreEngine.SINGBOX && SingboxProcess.isRunning) {
                 delay(1500)
                 pollSingboxStats()
             } else {
@@ -77,8 +79,18 @@ open class CommandClient(
             try {
                 val controller = activeCoreController
                 if (controller != null && controller.isRunning) {
-                    val uplink = controller.queryStats("proxy", "uplink")
-                    val downlink = controller.queryStats("proxy", "downlink")
+                    var uplink = controller.queryStats("proxy", "uplink")
+                    var downlink = controller.queryStats("proxy", "downlink")
+
+                    if (uplink == 0L && downlink == 0L) {
+                        readDeviceTrafficDelta()?.let { (txDelta, rxDelta) ->
+                            uplink = txDelta
+                            downlink = rxDelta
+                        }
+                    } else {
+                        // Keep fallback baseline aligned when native stats become available again.
+                        syncDeviceTrafficSnapshot()
+                    }
 
                     totalUplink += uplink
                     totalDownlink += downlink
@@ -149,10 +161,41 @@ open class CommandClient(
         return pattern.find(json)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
     }
 
+    private fun readDeviceTrafficTotals(): Pair<Long, Long>? {
+        val tx = TrafficStats.getTotalTxBytes()
+        val rx = TrafficStats.getTotalRxBytes()
+        val unsupported = TrafficStats.UNSUPPORTED.toLong()
+        if (tx <= unsupported || rx <= unsupported) return null
+        return tx to rx
+    }
+
+    private fun syncDeviceTrafficSnapshot() {
+        val totals = readDeviceTrafficTotals() ?: return
+        xrayLastTxBytes = totals.first
+        xrayLastRxBytes = totals.second
+    }
+
+    private fun readDeviceTrafficDelta(): Pair<Long, Long>? {
+        val totals = readDeviceTrafficTotals() ?: return null
+        if (xrayLastTxBytes < 0L || xrayLastRxBytes < 0L) {
+            xrayLastTxBytes = totals.first
+            xrayLastRxBytes = totals.second
+            return 0L to 0L
+        }
+
+        val txDelta = (totals.first - xrayLastTxBytes).coerceAtLeast(0L)
+        val rxDelta = (totals.second - xrayLastRxBytes).coerceAtLeast(0L)
+        xrayLastTxBytes = totals.first
+        xrayLastRxBytes = totals.second
+        return txDelta to rxDelta
+    }
+
     fun resetTotals() {
         totalUplink = 0L
         totalDownlink = 0L
         lastSingboxUpload = 0L
         lastSingboxDownload = 0L
+        xrayLastTxBytes = -1L
+        xrayLastRxBytes = -1L
     }
 }

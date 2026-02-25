@@ -10,17 +10,17 @@ project 'Runner', {
   'Release' => :release,
 }
 
-# Symlink HiddifyCore.xcframework from app's Frameworks/ to plugin's expected location.
+# Symlink Libbox.xcframework from app's Frameworks/ to plugin's expected location.
 # This runs before CocoaPods resolves dependencies, so vendored_frameworks validation passes.
 require 'fileutils'
-app_fw = File.expand_path('Frameworks/HiddifyCore.xcframework', __dir__)
+app_fw = File.expand_path('Frameworks/Libbox.xcframework', __dir__)
 plugin_fw_dir = File.expand_path('../../ios/Frameworks', __dir__)
-plugin_fw = File.join(plugin_fw_dir, 'HiddifyCore.xcframework')
+plugin_fw = File.join(plugin_fw_dir, 'Libbox.xcframework')
 
 if File.exist?(app_fw) && !File.exist?(plugin_fw)
   FileUtils.mkdir_p(plugin_fw_dir)
   FileUtils.ln_sf(app_fw, plugin_fw)
-  puts "Symlinked HiddifyCore.xcframework to plugin's Frameworks/"
+  puts "Symlinked Libbox.xcframework to plugin's Frameworks/"
 end
 
 def flutter_root

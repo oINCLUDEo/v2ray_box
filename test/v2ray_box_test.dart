@@ -166,6 +166,9 @@ class MockV2rayBoxPlatform
   Future<List<String>> getLogs() async => ['log line 1', 'log line 2'];
 
   @override
+  Future<bool> clearLogs() async => true;
+
+  @override
   Stream<Map<String, dynamic>> watchLogs() =>
       Stream.value({'message': 'test log'});
 

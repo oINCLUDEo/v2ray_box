@@ -39,33 +39,4 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
-  
-  # Copy hiddify-core.dylib to the app's Frameworks directory at build time
-  main_project = installer.aggregate_targets.first.user_project
-  runner_target = main_project.targets.find { |t| t.name == 'Runner' }
-  
-  if runner_target
-    phase_name = 'Copy HiddifyCore dylib'
-    existing = runner_target.shell_script_build_phases.find { |p| p.name == phase_name }
-    unless existing
-      phase = runner_target.new_shell_script_build_phase(phase_name)
-      phase.shell_script = <<-SCRIPT
-DYLIB_SRC="${SRCROOT}/Frameworks/hiddify-core.dylib"
-DYLIB_DST="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
-if [ -f "$DYLIB_SRC" ]; then
-  mkdir -p "$DYLIB_DST"
-  cp -f "$DYLIB_SRC" "$DYLIB_DST/"
-  SIGN_ID="${EXPANDED_CODE_SIGN_IDENTITY:-"-"}"
-  codesign --force --sign "$SIGN_ID" --timestamp=none "$DYLIB_DST/hiddify-core.dylib" || true
-  echo "Copied and signed hiddify-core.dylib"
-else
-  echo "warning: hiddify-core.dylib not found at $DYLIB_SRC"
-  echo "Download from https://github.com/hiddify/hiddify-core/releases"
-fi
-      SCRIPT
-      phase.output_paths = ['$(BUILT_PRODUCTS_DIR)/$(FRAMEWORKS_FOLDER_PATH)/hiddify-core.dylib']
-      phase.input_paths = ['$(SRCROOT)/Frameworks/hiddify-core.dylib']
-    end
-    main_project.save
-  end
 end
