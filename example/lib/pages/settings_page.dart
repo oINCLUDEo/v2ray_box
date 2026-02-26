@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:v2ray_box/v2ray_box.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -24,6 +25,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _loadingApps = true;
   String _searchQuery = '';
   final TextEditingController _searchCtrl = TextEditingController();
+  bool get _supportsPerAppProxy =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
@@ -39,7 +42,6 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _loadSettings() async {
     _mode = await widget.v2rayBox.getServiceMode();
-    _perAppMode = await widget.v2rayBox.getPerAppProxyMode();
     _debugMode = await widget.v2rayBox.getDebugMode();
     _pingTestUrl = await widget.v2rayBox.getPingTestUrl();
     try {
@@ -47,13 +49,21 @@ class _SettingsPageState extends State<SettingsPage> {
       _coreInfo = await widget.v2rayBox.getCoreInfo();
     } catch (_) {}
 
-    if (_perAppMode != PerAppProxyMode.off) {
-      final list = await widget.v2rayBox.getPerAppProxyList(_perAppMode);
-      _selectedApps = list.toSet();
+    if (_supportsPerAppProxy) {
+      _perAppMode = await widget.v2rayBox.getPerAppProxyMode();
+      if (_perAppMode != PerAppProxyMode.off) {
+        final list = await widget.v2rayBox.getPerAppProxyList(_perAppMode);
+        _selectedApps = list.toSet();
+      }
+    } else {
+      _perAppMode = PerAppProxyMode.off;
+      _loadingApps = false;
     }
 
     if (mounted) setState(() => _loadingSettings = false);
-    _loadApps();
+    if (_supportsPerAppProxy) {
+      _loadApps();
+    }
   }
 
   Future<void> _loadApps() async {
@@ -176,26 +186,26 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
 
-          // Per-App Proxy
-          SliverPadding(
-            padding: const EdgeInsets.all(16),
-            sliver: SliverToBoxAdapter(
-              child: _buildSection('Per-App Proxy', [
-                _buildPerAppTile(
-                  'Off',
-                  'All apps use VPN',
-                  PerAppProxyMode.off,
-                ),
-                _buildPerAppTile(
-                  'Exclude',
-                  'Selected apps bypass VPN',
-                  PerAppProxyMode.exclude,
-                ),
-              ]),
+          if (_supportsPerAppProxy)
+            SliverPadding(
+              padding: const EdgeInsets.all(16),
+              sliver: SliverToBoxAdapter(
+                child: _buildSection('Per-App Proxy', [
+                  _buildPerAppTile(
+                    'Off',
+                    'All apps use VPN',
+                    PerAppProxyMode.off,
+                  ),
+                  _buildPerAppTile(
+                    'Exclude',
+                    'Selected apps bypass VPN',
+                    PerAppProxyMode.exclude,
+                  ),
+                ]),
+              ),
             ),
-          ),
 
-          if (_perAppMode != PerAppProxyMode.off) ...[
+          if (_supportsPerAppProxy && _perAppMode != PerAppProxyMode.off) ...[
             SliverPadding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               sliver: SliverToBoxAdapter(

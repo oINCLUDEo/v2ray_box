@@ -52,73 +52,223 @@ class XrayConfigBuilder {
         return params
     }
 
+    private func getParam(_ params: [String: String], key: String) -> String? {
+        if let value = params[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            return value
+        }
+        if let value = params[key.lowercased()]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            return value
+        }
+        if let match = params.first(where: { $0.key.caseInsensitiveCompare(key) == .orderedSame }) {
+            let value = match.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func parseFlexibleBool(_ value: String?) -> Bool? {
+        guard let value else { return nil }
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private func isDomainLike(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        return value.contains { $0.isLetter }
+    }
+
+    private func resolveSecurity(_ params: [String: String], vmessJson: [String: Any]? = nil) -> String? {
+        if let rawSecurityEntry = params.first(where: { $0.key.caseInsensitiveCompare("security") == .orderedSame }) {
+            let explicit = rawSecurityEntry.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if explicit.isEmpty || explicit == "none" {
+                // Explicit empty/none security should stay plaintext.
+                return nil
+            }
+            return explicit
+        }
+        if (vmessJson?["tls"] as? String) == "tls" {
+            return "tls"
+        }
+        if getParam(params, key: "pbk") != nil || getParam(params, key: "sid") != nil {
+            return "reality"
+        }
+        let hasTlsHints = ["sni", "peer", "alpn", "fp", "fingerprint", "allowInsecure", "insecure"].contains {
+            getParam(params, key: $0) != nil
+        }
+        return hasTlsHints ? "tls" : nil
+    }
+
     // MARK: - Stream Settings
 
-    private func buildStreamSettings(_ params: [String: String], vmessJson: [String: Any]? = nil) -> [String: Any] {
+    private func buildStreamSettings(
+        _ params: [String: String],
+        vmessJson: [String: Any]? = nil,
+        defaultServerName: String? = nil
+    ) -> [String: Any] {
         var stream: [String: Any] = [:]
-        let networkType = params["type"] ?? vmessJson?["net"] as? String ?? "tcp"
+        var transportSniCandidate: String?
+        let networkTypeRaw = (getParam(params, key: "type")
+            ?? (vmessJson?["net"] as? String)
+            ?? "tcp")
+            .lowercased()
+        let networkType: String = {
+            switch networkTypeRaw {
+            case "websocket":
+                return "ws"
+            case "mkcp":
+                return "kcp"
+            case "http2":
+                return "h2"
+            case "http-upgrade":
+                return "httpupgrade"
+            case "split-http":
+                return "xhttp"
+            default:
+                return networkTypeRaw
+            }
+        }()
         stream["network"] = networkType
 
-        let security = params["security"] ?? {
-            if vmessJson?["tls"] as? String == "tls" { return "tls" }
-            return "none"
-        }()
+        let resolvedSecurity = resolveSecurity(params, vmessJson: vmessJson)
+        let security = resolvedSecurity ?? "none"
         stream["security"] = security
 
         switch networkType {
+        case "tcp":
+            let headerType = (
+                getParam(params, key: "headerType")
+                    ?? getParam(params, key: "header-type")
+                    ?? (vmessJson?["type"] as? String)
+                    ?? "none"
+            ).lowercased()
+            let host = getParam(params, key: "host") ?? (vmessJson?["host"] as? String)
+            if let host, !host.isEmpty {
+                transportSniCandidate = host.split(separator: ",").first?.trimmingCharacters(in: .whitespaces)
+            }
+
+            var tcpHeader: [String: Any] = ["type": headerType]
+            if headerType == "http" {
+                let hostList = host?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                let pathList = (
+                    getParam(params, key: "path")
+                        ?? (vmessJson?["path"] as? String)
+                )?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                let resolvedPathList = (pathList?.isEmpty == false) ? pathList! : ["/"]
+
+                var requestHeaders: [String: Any] = [
+                    "User-Agent": [
+                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"
+                    ],
+                    "Accept-Encoding": ["gzip, deflate"],
+                    "Connection": ["keep-alive"],
+                    "Pragma": "no-cache"
+                ]
+                if let hostList, !hostList.isEmpty {
+                    requestHeaders["Host"] = hostList
+                }
+
+                tcpHeader["request"] = [
+                    "version": "1.1",
+                    "method": "GET",
+                    "path": resolvedPathList,
+                    "headers": requestHeaders
+                ]
+            }
+            stream["tcpSettings"] = ["header": tcpHeader]
+
         case "ws", "websocket":
             var wsSettings: [String: Any] = [:]
-            let path = params["path"] ?? vmessJson?["path"] as? String ?? "/"
+            let path = getParam(params, key: "path") ?? (vmessJson?["path"] as? String) ?? "/"
             wsSettings["path"] = path
-            let host = params["host"] ?? vmessJson?["host"] as? String
-            if let h = host, !h.isEmpty { wsSettings["headers"] = ["Host": h] }
+            let host = getParam(params, key: "host") ?? (vmessJson?["host"] as? String)
+            if let host, !host.isEmpty {
+                wsSettings["headers"] = ["Host": host]
+                transportSniCandidate = host
+            }
             stream["wsSettings"] = wsSettings
+
         case "grpc":
             var grpcSettings: [String: Any] = [:]
-            let sn = params["serviceName"] ?? params["service-name"] ?? vmessJson?["path"] as? String
+            let sn = getParam(params, key: "serviceName")
+                ?? getParam(params, key: "service-name")
+                ?? (vmessJson?["path"] as? String)
             if let s = sn, !s.isEmpty { grpcSettings["serviceName"] = s }
-            if let mode = params["mode"], !mode.isEmpty { grpcSettings["multiMode"] = (mode == "multi") }
+            if let mode = getParam(params, key: "mode"), !mode.isEmpty {
+                grpcSettings["multiMode"] = (mode == "multi")
+            }
+            if let authority = getParam(params, key: "authority"), !authority.isEmpty {
+                grpcSettings["authority"] = authority
+                transportSniCandidate = authority
+            }
             stream["grpcSettings"] = grpcSettings
+
         case "h2", "http":
             var httpSettings: [String: Any] = [:]
-            let path = params["path"] ?? vmessJson?["path"] as? String
+            let path = getParam(params, key: "path") ?? (vmessJson?["path"] as? String)
             if let p = path, !p.isEmpty { httpSettings["path"] = p }
-            let host = params["host"] ?? vmessJson?["host"] as? String
-            if let h = host, !h.isEmpty {
-                httpSettings["host"] = h.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let host = getParam(params, key: "host") ?? (vmessJson?["host"] as? String)
+            if let host, !host.isEmpty {
+                let hostList = host.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                httpSettings["host"] = hostList
+                transportSniCandidate = hostList.first
             }
             stream["httpSettings"] = httpSettings
             stream["network"] = "h2"
+
         case "httpupgrade":
             var huSettings: [String: Any] = [:]
-            let path = params["path"] ?? vmessJson?["path"] as? String
+            let path = getParam(params, key: "path") ?? (vmessJson?["path"] as? String)
             if let p = path, !p.isEmpty { huSettings["path"] = p }
-            let host = params["host"] ?? vmessJson?["host"] as? String
-            if let h = host, !h.isEmpty { huSettings["host"] = h }
+            let host = getParam(params, key: "host") ?? (vmessJson?["host"] as? String)
+            if let host, !host.isEmpty {
+                huSettings["host"] = host
+                transportSniCandidate = host
+            }
             stream["httpupgradeSettings"] = huSettings
-        case "splithttp", "xhttp":
-            var shSettings: [String: Any] = [:]
-            let path = params["path"] ?? vmessJson?["path"] as? String
-            if let p = path, !p.isEmpty { shSettings["path"] = p }
-            let host = params["host"] ?? vmessJson?["host"] as? String
-            if let h = host, !h.isEmpty { shSettings["host"] = h }
-            if let mode = params["mode"], !mode.isEmpty { shSettings["mode"] = mode }
-            stream["splithttpSettings"] = shSettings
-            stream["network"] = "splithttp"
+
+        case "xhttp", "splithttp":
+            var xhttpSettings: [String: Any] = [:]
+            let path = getParam(params, key: "path") ?? (vmessJson?["path"] as? String)
+            if let path, !path.isEmpty { xhttpSettings["path"] = path }
+            let host = getParam(params, key: "host") ?? (vmessJson?["host"] as? String)
+            if let host, !host.isEmpty {
+                xhttpSettings["host"] = host
+                transportSniCandidate = host
+            }
+            if let mode = getParam(params, key: "mode"), !mode.isEmpty { xhttpSettings["mode"] = mode }
+            stream["xhttpSettings"] = xhttpSettings
+            stream["network"] = "xhttp"
+
         case "quic":
             var quicSettings: [String: Any] = [
-                "security": params["quicSecurity"] ?? "none",
-                "header": ["type": params["headerType"] ?? "none"]
+                "security": getParam(params, key: "quicSecurity") ?? "none",
+                "header": ["type": getParam(params, key: "headerType") ?? "none"]
             ]
-            if let key = params["key"], !key.isEmpty { quicSettings["key"] = key }
+            if let key = getParam(params, key: "key"), !key.isEmpty { quicSettings["key"] = key }
             stream["quicSettings"] = quicSettings
+
         case "kcp", "mkcp":
             var kcpSettings: [String: Any] = [
-                "header": ["type": params["headerType"] ?? "none"]
+                "header": ["type": getParam(params, key: "headerType") ?? "none"]
             ]
-            if let seed = params["seed"], !seed.isEmpty { kcpSettings["seed"] = seed }
+            if let seed = getParam(params, key: "seed"), !seed.isEmpty { kcpSettings["seed"] = seed }
             stream["kcpSettings"] = kcpSettings
             stream["network"] = "kcp"
+
         default:
             break
         }
@@ -126,28 +276,37 @@ class XrayConfigBuilder {
         switch security {
         case "tls":
             var tlsSettings: [String: Any] = [:]
-            let sni = params["sni"] ?? params["peer"] ?? vmessJson?["sni"] as? String
+            let sni = getParam(params, key: "sni")
+                ?? getParam(params, key: "peer")
+                ?? (vmessJson?["sni"] as? String)
+                ?? (isDomainLike(transportSniCandidate) ? transportSniCandidate : nil)
+                ?? (isDomainLike(defaultServerName) ? defaultServerName : nil)
             if let s = sni, !s.isEmpty { tlsSettings["serverName"] = s }
-            let alpn = params["alpn"] ?? vmessJson?["alpn"] as? String
+            let alpn = getParam(params, key: "alpn") ?? (vmessJson?["alpn"] as? String)
             if let a = alpn, !a.isEmpty {
                 tlsSettings["alpn"] = a.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             }
-            let fp = params["fp"] ?? params["fingerprint"]
+            let fp = getParam(params, key: "fp") ?? getParam(params, key: "fingerprint")
             if let f = fp, !f.isEmpty { tlsSettings["fingerprint"] = f }
-            if params["allowInsecure"] == "1" || params["allowInsecure"] == "true" {
+            if parseFlexibleBool(getParam(params, key: "allowInsecure") ?? getParam(params, key: "insecure")) == true {
                 tlsSettings["allowInsecure"] = true
             }
             stream["tlsSettings"] = tlsSettings
+
         case "reality":
             var realitySettings: [String: Any] = [:]
-            let sni = params["sni"] ?? params["peer"]
+            let sni = getParam(params, key: "sni")
+                ?? getParam(params, key: "peer")
+                ?? (isDomainLike(transportSniCandidate) ? transportSniCandidate : nil)
+                ?? (isDomainLike(defaultServerName) ? defaultServerName : nil)
             if let s = sni, !s.isEmpty { realitySettings["serverName"] = s }
-            let fp = params["fp"] ?? params["fingerprint"] ?? "chrome"
+            let fp = getParam(params, key: "fp") ?? getParam(params, key: "fingerprint") ?? "chrome"
             realitySettings["fingerprint"] = fp
-            if let pbk = params["pbk"], !pbk.isEmpty { realitySettings["publicKey"] = pbk }
-            if let sid = params["sid"], !sid.isEmpty { realitySettings["shortId"] = sid }
-            if let spx = params["spx"], !spx.isEmpty { realitySettings["spiderX"] = spx }
+            if let pbk = getParam(params, key: "pbk"), !pbk.isEmpty { realitySettings["publicKey"] = pbk }
+            if let sid = getParam(params, key: "sid"), !sid.isEmpty { realitySettings["shortId"] = sid }
+            if let spx = getParam(params, key: "spx"), !spx.isEmpty { realitySettings["spiderX"] = spx }
             stream["realitySettings"] = realitySettings
+
         default:
             break
         }
@@ -164,10 +323,10 @@ class XrayConfigBuilder {
 
         var user: [String: Any] = [
             "id": uuid,
-            "encryption": params["encryption"] ?? "none",
+            "encryption": getParam(params, key: "encryption") ?? "none",
             "level": 0
         ]
-        if let flow = params["flow"], !flow.isEmpty { user["flow"] = flow }
+        if let flow = getParam(params, key: "flow"), !flow.isEmpty { user["flow"] = flow }
 
         return [
             "tag": "proxy",
@@ -179,7 +338,7 @@ class XrayConfigBuilder {
                     "users": [user]
                 ]]
             ],
-            "streamSettings": buildStreamSettings(params)
+            "streamSettings": buildStreamSettings(params, defaultServerName: host)
         ]
     }
 
@@ -233,7 +392,7 @@ class XrayConfigBuilder {
                     ] as [String: Any]]
                 ] as [String: Any]]
             ],
-            "streamSettings": buildStreamSettings(params, vmessJson: json)
+            "streamSettings": buildStreamSettings(params, vmessJson: json, defaultServerName: address)
         ]
     }
 
@@ -257,7 +416,7 @@ class XrayConfigBuilder {
                     ] as [String: Any]]
                 ] as [String: Any]]
             ],
-            "streamSettings": buildStreamSettings(params)
+            "streamSettings": buildStreamSettings(params, defaultServerName: host)
         ]
     }
 
@@ -280,7 +439,7 @@ class XrayConfigBuilder {
                     "level": 0
                 ] as [String: Any]]
             ],
-            "streamSettings": buildStreamSettings(tlsParams)
+            "streamSettings": buildStreamSettings(tlsParams, defaultServerName: host)
         ]
     }
 
@@ -324,19 +483,65 @@ class XrayConfigBuilder {
         }
 
         guard !server.isEmpty, port > 0 else { return nil }
+        let params = queryParams(from: link)
+        let pluginValue = params["plugin"]?.lowercased()
+        var streamSettings: [String: Any] = [
+            "network": "tcp",
+            "tcpSettings": ["header": ["type": "none"]]
+        ]
+        if let pluginValue,
+           pluginValue.contains("obfs=http") {
+            var pluginOptions: [String: String] = [:]
+            for item in pluginValue.split(separator: ";") {
+                let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    pluginOptions[parts[0].trimmingCharacters(in: .whitespaces)] = parts[1].trimmingCharacters(in: .whitespaces)
+                }
+            }
+            let hostList = pluginOptions["obfs-host"]?
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let path = (pluginOptions["path"]?.trimmingCharacters(in: .whitespaces).isEmpty == false)
+                ? pluginOptions["path"]!
+                : "/"
+            var requestHeaders: [String: Any] = [
+                "User-Agent": [
+                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36"
+                ],
+                "Accept-Encoding": ["gzip, deflate"],
+                "Connection": ["keep-alive"],
+                "Pragma": "no-cache"
+            ]
+            if let hostList, !hostList.isEmpty {
+                requestHeaders["Host"] = hostList
+            }
+            streamSettings["tcpSettings"] = [
+                "header": [
+                    "type": "http",
+                    "request": [
+                        "version": "1.1",
+                        "method": "GET",
+                        "path": [path],
+                        "headers": requestHeaders
+                    ]
+                ]
+            ]
+        }
+
         return [
             "tag": "proxy",
             "protocol": "shadowsocks",
             "settings": [
                 "servers": [[
                     "address": server,
-                    "server_port": port,
+                    "port": port,
                     "method": method,
                     "password": password,
                     "level": 0
                 ] as [String: Any]]
             ],
-            "streamSettings": ["network": "tcp"] as [String: Any]
+            "streamSettings": streamSettings
         ]
     }
 
@@ -405,6 +610,7 @@ class XrayConfigBuilder {
     private func buildFullConfig(outbound: [String: Any], proxyOnly: Bool) -> [String: Any] {
         let socksPort = configOptions["socks-port"] as? Int ?? 10808
         let httpPort = configOptions["http-port"] as? Int ?? 10809
+        let apiPort = configOptions["xray-api-port"] as? Int ?? 10085
 
         var inbounds: [[String: Any]] = [
             [
@@ -434,6 +640,15 @@ class XrayConfigBuilder {
                     "routeOnly": true
                 ],
                 "settings": [:] as [String: Any]
+            ],
+            [
+                "tag": "api-in",
+                "port": apiPort,
+                "listen": "127.0.0.1",
+                "protocol": "dokodemo-door",
+                "settings": [
+                    "address": "127.0.0.1"
+                ]
             ]
         ]
 
@@ -456,12 +671,21 @@ class XrayConfigBuilder {
 
         return [
             "log": ["loglevel": "warning"],
+            "api": [
+                "tag": "api",
+                "services": [
+                    "HandlerService",
+                    "StatsService",
+                    "LoggerService"
+                ]
+            ],
             "dns": buildDns(),
             "inbounds": inbounds,
             "outbounds": [
                 outbound,
                 ["tag": "direct", "protocol": "freedom", "settings": [:] as [String: Any]],
-                ["tag": "block", "protocol": "blackhole", "settings": ["response": ["type": "http"]]]
+                ["tag": "block", "protocol": "blackhole", "settings": ["response": ["type": "http"]]],
+                ["tag": "api", "protocol": "freedom", "settings": [:] as [String: Any]]
             ],
             "routing": buildRouting(),
             "stats": [:] as [String: Any],
@@ -480,6 +704,11 @@ class XrayConfigBuilder {
         return [
             "domainStrategy": "IPIfNonMatch",
             "rules": [
+                [
+                    "type": "field",
+                    "inboundTag": ["api-in"],
+                    "outboundTag": "api"
+                ],
                 [
                     "type": "field",
                     "outboundTag": "direct",
