@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 class XrayProcess {
     static let shared = XrayProcess()
@@ -6,6 +7,7 @@ class XrayProcess {
     private var process: Process?
     private(set) var isRunning: Bool = false
     private let lock = NSLock()
+    var onLog: ((String) -> Void)?
     
     private init() {}
     
@@ -167,8 +169,12 @@ class XrayProcess {
             DispatchQueue.global(qos: .background).async {
                 outputPipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
-                    if let line = String(data: data, encoding: .utf8), !line.isEmpty {
-                        print("XrayCore: \(line)")
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                        for line in lines {
+                            print("XrayCore: \(line)")
+                            self.onLog?(line)
+                        }
                     }
                 }
             }
@@ -190,6 +196,75 @@ class XrayProcess {
             return false
         }
     }
+
+    func validateConfig(configPath: String) -> String {
+        guard let binaryPath = getBinaryPath() else {
+            return "xray binary not found"
+        }
+        do {
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: binaryPath)
+            proc.arguments = ["run", "-test", "-c", configPath]
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try proc.run()
+            proc.waitUntilExit()
+
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if proc.terminationStatus == 0 {
+                return ""
+            }
+            return output.isEmpty ? "xray config validation failed" : output
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func queryTrafficStats(apiServer: String = "127.0.0.1:10085", timeoutSeconds: Int = 2) -> (upload: Int64, download: Int64)? {
+        guard isRunning, let binaryPath = getBinaryPath() else { return nil }
+        do {
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: binaryPath)
+            proc.arguments = [
+                "api",
+                "statsquery",
+                "--server=\(apiServer)",
+                "-timeout",
+                "\(max(1, timeoutSeconds))",
+                "-pattern",
+                "outbound>>>proxy>>>traffic>>>"
+            ]
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let upload = extractStatValue(from: output, keys: ["outbound>>>proxy>>>traffic>>>uplink"])
+            let download = extractStatValue(from: output, keys: ["outbound>>>proxy>>>traffic>>>downlink"])
+            return (upload, download)
+        } catch {
+            return nil
+        }
+    }
+
+    private func extractStatValue(from output: String, keys: [String]) -> Int64 {
+        for key in keys {
+            let escaped = NSRegularExpression.escapedPattern(for: key)
+            let pattern = #"name:\s*""# + escaped + #""[\s\S]*?value:\s*(\d+)"#
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..<output.endIndex, in: output)),
+               let valueRange = Range(match.range(at: 1), in: output),
+               let value = Int64(output[valueRange]) {
+                return value
+            }
+        }
+        return 0
+    }
     
     func stop() {
         lock.lock()
@@ -198,8 +273,20 @@ class XrayProcess {
         guard let proc = process else { return }
         
         print("V2rayBox: Stopping xray process")
-        proc.terminate()
-        proc.waitUntilExit()
+        if proc.isRunning {
+            proc.terminate()
+            let deadline = Date().addingTimeInterval(1.5)
+            while proc.isRunning && Date() < deadline {
+                usleep(50_000)
+            }
+        }
+        if proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+            let hardDeadline = Date().addingTimeInterval(1.0)
+            while proc.isRunning && Date() < hardDeadline {
+                usleep(50_000)
+            }
+        }
         
         process = nil
         isRunning = false

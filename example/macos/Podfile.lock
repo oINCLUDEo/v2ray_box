@@ -8,7 +8,7 @@ PODS:
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
-  - v2ray_box (0.0.1):
+  - v2ray_box (1.0.0):
     - FlutterMacOS
 
 DEPENDENCIES:
@@ -35,8 +35,8 @@ SPEC CHECKSUMS:
   mobile_scanner: 9157936403f5a0644ca3779a38ff8404c5434a93
   share_plus: 510bf0af1a42cd602274b4629920c9649c52f4cc
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
-  v2ray_box: 7e4b363599c948fea601cc57d004df89a287b21d
+  v2ray_box: 2a989f7ac695abff488b4f577bd3fdfe3f537154
 
-PODFILE CHECKSUM: 73f2763387fa500e6cfd9ba7219eb985b9d84ef3
+PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
 
 COCOAPODS: 1.16.2

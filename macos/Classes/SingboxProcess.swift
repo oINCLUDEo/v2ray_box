@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 class SingboxProcess {
     static let shared = SingboxProcess()
@@ -6,6 +7,7 @@ class SingboxProcess {
     private var process: Process?
     private(set) var isRunning: Bool = false
     private let lock = NSLock()
+    var onLog: ((String) -> Void)?
     
     private init() {}
     
@@ -155,8 +157,12 @@ class SingboxProcess {
             DispatchQueue.global(qos: .background).async {
                 outputPipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
-                    if let line = String(data: data, encoding: .utf8), !line.isEmpty {
-                        print("SingboxCore: \(line)")
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                        for line in lines {
+                            print("SingboxCore: \(line)")
+                            self.onLog?(line)
+                        }
                     }
                 }
             }
@@ -178,6 +184,32 @@ class SingboxProcess {
             return false
         }
     }
+
+    func validateConfig(configPath: String, workingDir: String) -> String {
+        guard let binaryPath = getBinaryPath() else {
+            return "sing-box binary not found"
+        }
+        do {
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: binaryPath)
+            proc.arguments = ["check", "-c", configPath, "-D", workingDir]
+            proc.currentDirectoryURL = URL(fileURLWithPath: workingDir)
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try proc.run()
+            proc.waitUntilExit()
+
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if proc.terminationStatus == 0 {
+                return ""
+            }
+            return output.isEmpty ? "sing-box config validation failed" : output
+        } catch {
+            return error.localizedDescription
+        }
+    }
     
     func stop() {
         lock.lock()
@@ -186,8 +218,20 @@ class SingboxProcess {
         guard let proc = process else { return }
         
         print("V2rayBox: Stopping sing-box process")
-        proc.terminate()
-        proc.waitUntilExit()
+        if proc.isRunning {
+            proc.terminate()
+            let deadline = Date().addingTimeInterval(1.5)
+            while proc.isRunning && Date() < deadline {
+                usleep(50_000)
+            }
+        }
+        if proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+            let hardDeadline = Date().addingTimeInterval(1.0)
+            while proc.isRunning && Date() < hardDeadline {
+                usleep(50_000)
+            }
+        }
         
         process = nil
         isRunning = false

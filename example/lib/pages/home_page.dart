@@ -871,7 +871,7 @@ class _HomePageState extends State<HomePage>
               ),
               const SizedBox(height: 12),
               Text(
-                'In Proxy mode, Android apps do not route traffic automatically. '
+                'In Proxy mode, apps may not route traffic automatically. '
                 'Set proxy manually in app/system settings using these local endpoints.',
                 style: TextStyle(
                   color: Colors.grey[350],

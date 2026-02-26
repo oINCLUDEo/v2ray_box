@@ -24,7 +24,7 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     }
     
     private var pingTestUrl: String {
-        get { UserDefaults.standard.string(forKey: "v2ray_box_ping_test_url") ?? "http://connectivitycheck.gstatic.com/generate_204" }
+        get { UserDefaults.standard.string(forKey: "v2ray_box_ping_test_url") ?? "https://www.gstatic.com/generate_204" }
         set { UserDefaults.standard.set(newValue, forKey: "v2ray_box_ping_test_url") }
     }
     
@@ -115,8 +115,12 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            guard let self else { return }
             guard let connection = notification.object as? NEVPNConnection else { return }
-            self?.handleVPNStatusChange(connection.status)
+            if let managedConnection = self.tunnelManager?.connection, managedConnection !== connection {
+                return
+            }
+            self.handleVPNStatusChange(connection.status)
         }
     }
     
@@ -130,6 +134,10 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
         case .disconnecting:
             statusString = "Stopping"
         case .disconnected, .invalid:
+            lastSingboxUpload = 0
+            lastSingboxDownload = 0
+            lastXrayUpload = 0
+            lastXrayDownload = 0
             statusString = "Stopped"
         @unknown default:
             statusString = "Stopped"
@@ -334,6 +342,9 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
             
         case "get_logs":
             result([String]())
+
+        case "clear_logs":
+            result(true)
             
         case "set_debug_mode":
             if let enabled = call.arguments as? Bool {
@@ -487,21 +498,30 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     
     // MARK: - VPN Management
     
+    private func packetTunnelBundleIdentifier() -> String {
+        let mainId = Bundle.main.bundleIdentifier ?? "com.example.v2rayBoxExample"
+        return "\(mainId).PacketTunnel"
+    }
+
     private func loadVPNPreference() async throws {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        if let manager = managers.first {
-            tunnelManager = manager
+        let desiredBundleId = packetTunnelBundleIdentifier()
+
+        if let existing = managers.first(where: { manager in
+            guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+            return proto.providerBundleIdentifier == desiredBundleId
+        }) {
+            tunnelManager = existing
             return
         }
-        
-        // Create new manager
+
         let newManager = NETunnelProviderManager()
         let tunnelProtocol = NETunnelProviderProtocol()
-        tunnelProtocol.providerBundleIdentifier = Bundle.main.bundleIdentifier! + ".PacketTunnel"
+        tunnelProtocol.providerBundleIdentifier = desiredBundleId
         tunnelProtocol.serverAddress = "V2RayBox"
         newManager.protocolConfiguration = tunnelProtocol
         newManager.localizedDescription = "V2Ray Box"
-        
+
         try await newManager.saveToPreferences()
         try await newManager.loadFromPreferences()
         tunnelManager = newManager
@@ -519,14 +539,21 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     private func parseConfig(link: String, debug: Bool, result: @escaping FlutterResult) {
         Task {
             do {
-                // Write link to temp file for parsing
-                let tempDir = getTempDirectory()
-                let configPath = tempDir.appendingPathComponent("temp_config.txt")
-                try link.write(to: configPath, atomically: true, encoding: .utf8)
-                
-                // For now, just validate the link format
-                await MainActor.run {
-                    result("")
+                if coreEngine == "xray" {
+                    let config = try xrayConfigBuilder.buildConfig(from: link, proxyOnly: true)
+                    if let data = config.data(using: .utf8),
+                       (try? JSONSerialization.jsonObject(with: data)) != nil {
+                        await MainActor.run { result("") }
+                    } else {
+                        await MainActor.run { result("Invalid xray config JSON") }
+                    }
+                } else {
+                    let config = try singboxConfigBuilder.buildConfig(from: link)
+                    var checkError: NSError?
+                    let ok = LibboxCheckConfig(config, &checkError)
+                    await MainActor.run {
+                        result(ok ? "" : (checkError?.localizedDescription ?? "Config validation failed"))
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -623,12 +650,15 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     // MARK: - Stop VPN
     
     private func stop(result: @escaping FlutterResult) {
-        guard let manager = tunnelManager,
-              manager.connection.status == .connected else {
+        guard let manager = tunnelManager else {
             result(true)
             return
         }
-        
+        let status = manager.connection.status
+        guard status != .disconnected && status != .invalid else {
+            result(true)
+            return
+        }
         manager.connection.stopVPNTunnel()
         result(true)
     }
@@ -637,15 +667,18 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     
     private func restart(link: String, name: String, result: @escaping FlutterResult) {
         Task {
-            // Stop first if running
-            if tunnelManager?.connection.status == .connected {
-                tunnelManager?.connection.stopVPNTunnel()
-                
-                // Wait for disconnection
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+            if let manager = tunnelManager {
+                let status = manager.connection.status
+                if status != .disconnected && status != .invalid {
+                    manager.connection.stopVPNTunnel()
+                    let deadline = Date().addingTimeInterval(3.0)
+                    while Date() < deadline {
+                        let current = manager.connection.status
+                        if current == .disconnected || current == .invalid { break }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                }
             }
-            
-            // Start with new config
             start(link: link, name: name, result: result)
         }
     }
@@ -689,104 +722,26 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
     }
     
     private func performURLTest(link: String, timeout: Int) async -> Int {
-        // Parse server from link and do TCP test
-        guard let (host, port) = parseServerFromLink(link),
-              !host.isEmpty, port > 0 else {
-            return -1
-        }
-        
-        // Use NWConnection for more reliable connection test on iOS
+        guard let url = URL(string: pingTestUrl) else { return -1 }
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.timeoutIntervalForRequest = max(1.0, Double(timeout) / 1000.0)
+        sessionConfig.timeoutIntervalForResource = max(1.0, Double(timeout) / 1000.0)
+        let session = URLSession(configuration: sessionConfig)
         return await withCheckedContinuation { continuation in
-            let startTime = CFAbsoluteTimeGetCurrent()
-            
-            let endpoint = NWEndpoint.hostPort(
-                host: NWEndpoint.Host(host),
-                port: NWEndpoint.Port(integerLiteral: UInt16(port))
-            )
-            
-            let parameters = NWParameters.tcp
-            parameters.expiredDNSBehavior = .allow
-            
-            let connection = NWConnection(to: endpoint, using: parameters)
-            
-            var hasCompleted = false
-            let lock = NSLock()
-            
-            // Timeout timer
-            let timeoutWorkItem = DispatchWorkItem {
-                lock.lock()
-                if !hasCompleted {
-                    hasCompleted = true
-                    lock.unlock()
-                    connection.cancel()
-                    continuation.resume(returning: -1)
+            let start = CFAbsoluteTimeGetCurrent()
+            var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+                                 timeoutInterval: max(1.0, Double(timeout) / 1000.0))
+            req.httpMethod = "GET"
+            session.dataTask(with: req) { _, response, error in
+                if error != nil { continuation.resume(returning: -1); return }
+                if let http = response as? HTTPURLResponse,
+                   http.statusCode == 200 || http.statusCode == 204 {
+                    continuation.resume(returning: max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000)))
                 } else {
-                    lock.unlock()
-                }
-            }
-            
-            DispatchQueue.global().asyncAfter(
-                deadline: .now() + .milliseconds(timeout),
-                execute: timeoutWorkItem
-            )
-            
-            connection.stateUpdateHandler = { state in
-                lock.lock()
-                guard !hasCompleted else {
-                    lock.unlock()
-                    return
-                }
-                
-                switch state {
-                case .ready:
-                    hasCompleted = true
-                    lock.unlock()
-                    timeoutWorkItem.cancel()
-                    let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
-                    connection.cancel()
-                    continuation.resume(returning: elapsed)
-                    
-                case .failed(_), .cancelled:
-                    hasCompleted = true
-                    lock.unlock()
-                    timeoutWorkItem.cancel()
                     continuation.resume(returning: -1)
-                    
-                default:
-                    lock.unlock()
                 }
-            }
-            
-            connection.start(queue: DispatchQueue.global())
+            }.resume()
         }
-    }
-    
-    private func parseServerFromLink(_ link: String) -> (String, Int)? {
-        if link.hasPrefix("vmess://") {
-            return parseVmessServer(link)
-        } else if link.hasPrefix("vless://") || link.hasPrefix("trojan://") || link.hasPrefix("ss://") {
-            guard let url = URL(string: link),
-                  let host = url.host else { return nil }
-            let port = url.port ?? 443
-            return (host, port)
-        }
-        return nil
-    }
-    
-    private func parseVmessServer(_ link: String) -> (String, Int)? {
-        let encoded = String(link.dropFirst("vmess://".count))
-        guard let data = Data(base64Encoded: encoded),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let host = json["add"] as? String else { return nil }
-        let port: Int
-        if let portNum = json["port"] as? Int {
-            port = portNum
-        } else if let portStr = json["port"] as? String, let portNum = Int(portStr) {
-            port = portNum
-        } else {
-            port = 443
-        }
-        return (host, port)
     }
     
     // MARK: - Start With JSON
@@ -938,8 +893,16 @@ public class V2rayBoxPlugin: NSObject, FlutterPlugin {
         }
     }
     
+    private func getClashApiPort() -> Int {
+        if let data = configOptions.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return json["clash-api-port"] as? Int ?? 9090
+        }
+        return 9090
+    }
+
     private func pollSingboxStats() {
-        let clashApiPort = 9090
+        let clashApiPort = getClashApiPort()
         guard let url = URL(string: "http://127.0.0.1:\(clashApiPort)/connections") else { return }
         
         let config = URLSessionConfiguration.ephemeral
