@@ -30,12 +30,6 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     private val service = BoxService(this, this)
     private var tunPfd: ParcelFileDescriptor? = null
     private val connectivity by lazy { getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager }
-    private val defaultNetworkRequest by lazy {
-        NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-            .build()
-    }
     private val defaultNetworkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             runCatching { setUnderlyingNetworks(arrayOf(network)) }
@@ -172,30 +166,31 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
         service.fileDescriptor = null
     }
 
-    private fun registerDefaultNetworkCallback() {
-        if (defaultNetworkCallbackRegistered) return
-        try {
-            when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
-                    // ✅ registerDefaultNetworkCallback — единственно правильный
-                    // способ для VPN. Автоматически следит за активной сетью
-                    // (Wi-Fi, LTE, Ethernet) без дополнительных capability фильтров
-                    connectivity.registerDefaultNetworkCallback(defaultNetworkCallback)
-                }
-                else -> {
-                    // Android 8 и ниже — requestNetwork без NOT_RESTRICTED
-                    val request = NetworkRequest.Builder()
-                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        .build()
-                    connectivity.requestNetwork(request, defaultNetworkCallback)
-                }
-            }
-            defaultNetworkCallbackRegistered = true
-            Log.d(TAG, "Network callback registered OK (SDK=${Build.VERSION.SDK_INT})")
-        } catch (e: Exception) {
-            Log.w(TAG, "registerDefaultNetworkCallback failed: ${e.message}")
-        }
-    }
+	private fun registerDefaultNetworkCallback() {
+    	if (defaultNetworkCallbackRegistered) return
+    		try {
+        	when {
+            	Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                	// registerDefaultNetworkCallback — единственно правильный
+                	// метод для VPN-сервиса. Всегда отслеживает текущую
+                	// дефолтную сеть Android, независимо от типа (LTE/Wi-Fi)
+                	connectivity.registerDefaultNetworkCallback(defaultNetworkCallback)
+            	}
+            	else -> {
+                	// Android < 9: requestNetwork БЕЗ NOT_RESTRICTED
+                	// NOT_RESTRICTED отфильтровывает LTE у многих операторов РФ
+                	val request = NetworkRequest.Builder()
+                    	.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    	.build()
+                	connectivity.requestNetwork(request, defaultNetworkCallback)
+            	}
+        	}
+        	defaultNetworkCallbackRegistered = true
+        	Log.d(TAG, "Network callback registered (SDK=${Build.VERSION.SDK_INT})")
+    	} catch (e: Exception) {
+        	Log.w(TAG, "registerDefaultNetworkCallback failed: ${e.message}")
+    	}
+	}
 
     private fun unregisterDefaultNetworkCallback() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
