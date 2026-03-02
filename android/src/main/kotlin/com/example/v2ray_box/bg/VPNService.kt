@@ -173,19 +173,29 @@ class VPNService : VpnService(), PlatformInterfaceWrapper {
     }
 
     private fun registerDefaultNetworkCallback() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            return
+    if (defaultNetworkCallbackRegistered) return
+    try {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> {
+                // ✅ registerDefaultNetworkCallback — единственно правильный
+                // способ для VPN. Автоматически следит за активной сетью
+                // (Wi-Fi, LTE, Ethernet) без дополнительных capability фильтров
+                connectivity.registerDefaultNetworkCallback(defaultNetworkCallback)
+            }
+            else -> {
+                // Android 8 и ниже — requestNetwork без NOT_RESTRICTED
+                val request = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
+                connectivity.requestNetwork(request, defaultNetworkCallback)
+            }
         }
-        if (defaultNetworkCallbackRegistered) {
-            return
-        }
-        try {
-            connectivity.requestNetwork(defaultNetworkRequest, defaultNetworkCallback)
-            defaultNetworkCallbackRegistered = true
-        } catch (e: Exception) {
-            Log.w(TAG, "Unable to register default network callback", e)
-        }
+        defaultNetworkCallbackRegistered = true
+        Log.d(TAG, "Network callback registered OK (SDK=${Build.VERSION.SDK_INT})")
+    } catch (e: Exception) {
+        Log.w(TAG, "registerDefaultNetworkCallback failed: ${e.message}")
     }
+}
 
     private fun unregisterDefaultNetworkCallback() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
